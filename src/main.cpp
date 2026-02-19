@@ -25,6 +25,7 @@ struct Options {
   int period_ms = 50;
   int ring_ms = 2000;
   bool list_devices = false;
+  bool show_help = false;
 };
 
 std::atomic<bool> g_running{true};
@@ -36,6 +37,9 @@ void HandleSignal(int) {
 void PrintUsage(const char* exe) {
   std::printf(
       "Usage: %s [options]\n"
+      "\n"
+      "Minimal multichannel recorder using ALSA + RF64 WAV.\n"
+      "\n"
       "Options:\n"
       "  -d, --device <name>     ALSA device (default: \"default\")\n"
       "  -o, --out <path>        Output RF64 file (default: capture.rf64)\n"
@@ -61,8 +65,8 @@ bool ParseArgs(int argc, char** argv, Options* out) {
     };
 
     if (arg == "-h" || arg == "--help") {
-      PrintUsage(argv[0]);
-      return false;
+      out->show_help = true;
+      return true;
     }
     if (arg == "-L" || arg == "--list-devices") {
       out->list_devices = true;
@@ -222,6 +226,11 @@ int main(int argc, char** argv) {
   Options opt;
   if (!ParseArgs(argc, argv, &opt)) {
     return 1;
+  }
+
+  if (opt.show_help) {
+    PrintUsage(argv[0]);
+    return 0;
   }
 
   if (opt.list_devices) {
