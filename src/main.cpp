@@ -24,6 +24,7 @@ struct Options {
   int buffer_ms = 200;
   int period_ms = 50;
   int ring_ms = 2000;
+  bool list_devices = false;
 };
 
 std::atomic<bool> g_running{true};
@@ -43,6 +44,7 @@ void PrintUsage(const char* exe) {
       "  --buffer-ms <ms>        ALSA buffer time in ms (default: 200)\n"
       "  --period-ms <ms>        ALSA period time in ms (default: 50)\n"
       "  --ring-ms <ms>          Ring buffer time in ms (default: 2000)\n"
+      "  -L, --list-devices      List ALSA PCM devices and exit\n"
       "  -h, --help              Show this help\n",
       exe);
 }
@@ -61,6 +63,10 @@ bool ParseArgs(int argc, char** argv, Options* out) {
     if (arg == "-h" || arg == "--help") {
       PrintUsage(argv[0]);
       return false;
+    }
+    if (arg == "-L" || arg == "--list-devices") {
+      out->list_devices = true;
+      continue;
     }
     if (arg == "-d" || arg == "--device") {
       const char* v = need_value(arg.c_str());
@@ -179,12 +185,48 @@ class RingBuffer {
   size_t size_ = 0;
 };
 
+void ListAlsaDevices() {
+  void** hints = nullptr;
+  const int rc = snd_device_name_hint(-1, "pcm", &hints);
+  if (rc < 0) {
+    std::fprintf(stderr, "snd_device_name_hint failed: %s\n",
+                 snd_strerror(rc));
+    return;
+  }
+
+  std::printf("ALSA PCM devices:\n");
+  for (void** it = hints; it && *it; ++it) {
+    char* name = snd_device_name_get_hint(*it, "NAME");
+    char* desc = snd_device_name_get_hint(*it, "DESC");
+    char* ioid = snd_device_name_get_hint(*it, "IOID");
+
+    if (name) {
+      const char* io = ioid ? ioid : "Unknown";
+      std::printf("- %s [%s]\n", name, io);
+      if (desc) {
+        std::printf("  %s\n", desc);
+      }
+    }
+
+    if (name) std::free(name);
+    if (desc) std::free(desc);
+    if (ioid) std::free(ioid);
+  }
+
+  snd_device_name_free_hint(hints);
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
   Options opt;
   if (!ParseArgs(argc, argv, &opt)) {
     return 1;
+  }
+
+  if (opt.list_devices) {
+    ListAlsaDevices();
+    return 0;
   }
 
   std::signal(SIGINT, HandleSignal);
