@@ -38,6 +38,7 @@ Example (96 kHz, larger ring buffer):
 - `--buffer-ms <ms>` ALSA buffer time (default 200)
 - `--period-ms <ms>` ALSA period time (default 50)
 - `--ring-ms <ms>` ring buffer time (default 2000)
+- `--status-ms <ms>` print status every N ms (default 0=off)
 - `--list-devices` list ALSA PCM devices and exit
 
 ## USB stability checklist (sporadic clicks with zero XRUNs)

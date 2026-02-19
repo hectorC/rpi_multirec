@@ -24,6 +24,7 @@ struct Options {
   int buffer_ms = 200;
   int period_ms = 50;
   int ring_ms = 2000;
+  int status_ms = 0;
   bool list_devices = false;
   bool show_help = false;
 };
@@ -48,6 +49,7 @@ void PrintUsage(const char* exe) {
       "  --buffer-ms <ms>        ALSA buffer time in ms (default: 200)\n"
       "  --period-ms <ms>        ALSA period time in ms (default: 50)\n"
       "  --ring-ms <ms>          Ring buffer time in ms (default: 2000)\n"
+      "  --status-ms <ms>        Print status every N ms (default: 0=off)\n"
       "  -L, --list-devices      List ALSA PCM devices and exit\n"
       "  -h, --help              Show this help\n",
       exe);
@@ -114,6 +116,12 @@ bool ParseArgs(int argc, char** argv, Options* out) {
       out->ring_ms = std::atoi(v);
       continue;
     }
+    if (arg == "--status-ms") {
+      const char* v = need_value(arg.c_str());
+      if (!v) return false;
+      out->status_ms = std::atoi(v);
+      continue;
+    }
 
     std::fprintf(stderr, "Unknown arg: %s\n", arg.c_str());
     PrintUsage(argv[0]);
@@ -138,6 +146,10 @@ bool ParseArgs(int argc, char** argv, Options* out) {
   }
   if (out->ring_ms <= 0) {
     std::fprintf(stderr, "ring-ms must be > 0\n");
+    return false;
+  }
+  if (out->status_ms < 0) {
+    std::fprintf(stderr, "status-ms must be >= 0\n");
     return false;
   }
   return true;
@@ -405,6 +417,9 @@ int main(int argc, char** argv) {
                static_cast<unsigned long>(opt.ring_ms),
                static_cast<unsigned long>(ring_bytes / (1024 * 1024)));
 
+  auto next_status = std::chrono::steady_clock::now();
+  const auto status_interval = std::chrono::milliseconds(opt.status_ms);
+
   while (g_running.load()) {
     snd_pcm_sframes_t frames =
         snd_pcm_readi(pcm, buffer.data(), period_size);
@@ -440,6 +455,29 @@ int main(int argc, char** argv) {
       dropped_bytes.fetch_add(bytes);
     } else {
       ring_cv.notify_one();
+    }
+
+    if (opt.status_ms > 0) {
+      const auto now = std::chrono::steady_clock::now();
+      if (now >= next_status) {
+        const uint64_t xruns = xrun_count.load();
+        const uint64_t dropped = dropped_bytes.load();
+        size_t ring_used = 0;
+        {
+          std::lock_guard<std::mutex> lock(ring_mutex);
+          ring_used = ring.size();
+        }
+        const double ring_fill =
+            ring.capacity() == 0
+                ? 0.0
+                : (100.0 * static_cast<double>(ring_used) /
+                   static_cast<double>(ring.capacity()));
+        std::fprintf(stderr,
+                     "[status] xruns=%llu dropped=%lluB ring=%.1f%%\n",
+                     static_cast<unsigned long long>(xruns),
+                     static_cast<unsigned long long>(dropped), ring_fill);
+        next_status = now + status_interval;
+      }
     }
   }
 
