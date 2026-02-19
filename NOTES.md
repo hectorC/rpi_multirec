@@ -39,3 +39,18 @@ Example (96 kHz, larger ring buffer):
 - `--period-ms <ms>` ALSA period time (default 50)
 - `--ring-ms <ms>` ring buffer time (default 2000)
 - `--list-devices` list ALSA PCM devices and exit
+
+## USB stability checklist (sporadic clicks with zero XRUNs)
+If you see kernel logs like:
+```
+dwc2_hc_halt() Channel can't be halted
+```
+it points to USB controller instability on the Pi.
+
+Recommended steps:
+1. Use a known-good 5V/2.5A+ power supply.
+2. Try a short, high-quality USB cable.
+3. Disable Wi-Fi/Bluetooth temporarily to reduce bus contention:
+   - `sudo rfkill block wifi`
+   - `sudo rfkill block bluetooth`
+4. If available, use a powered USB hub between the Pi and mic.
