@@ -35,6 +35,10 @@ Example (96 kHz, larger ring buffer):
 - `--out <path>` output RF64 file
 - `--rate 48000|96000`
 - `--channels <n>` default 84
+- `--format s16|s24` sample format (default s24)
+- `--access rw|mmap` ALSA access type (default rw)
+- `--start auto|explicit` stream start mode (default explicit)
+- `--stdin-raw` read raw PCM from stdin instead of ALSA
 - `--buffer-ms <ms>` ALSA buffer time (default 200)
 - `--period-ms <ms>` ALSA period time (default 50)
 - `--ring-ms <ms>` ring buffer time (default 2000)
@@ -55,3 +59,10 @@ Recommended steps:
    - `sudo rfkill block wifi`
    - `sudo rfkill block bluetooth`
 4. If available, use a powered USB hub between the Pi and mic.
+
+## Stdin raw mode (arecord + RF64)
+Use ALSA `arecord` for capture and pipe raw PCM into the RF64 writer:
+```bash
+arecord -D hw:CARD=ZM13E,DEV=0 -f S24_3LE -c 19 -r 48000 -t raw | \
+  ./build/rpi_multirec --stdin-raw --rate 48000 --channels 19 --format s24 --out /home/pi/zm1.rf64
+```
