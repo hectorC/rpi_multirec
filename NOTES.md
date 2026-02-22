@@ -32,7 +32,7 @@ Example (96 kHz, larger ring buffer):
 
 ## Options
 - `--device <name>` ALSA device (default: `default`)
-- `--out <path>` output RF64 file
+- `--out <path>` output RF64 file (optional when `--mic` is set)
 - `--rate 48000|96000`
 - `--channels <n>` default 84
 - `--mic spcmic|zylia` mic preset for device/channels/access
@@ -58,6 +58,16 @@ Example (96 kHz, larger ring buffer):
 - `--access mmap`
 
 Explicit `--device`, `--channels`, and `--access` arguments override the preset values.
+
+## Automatic file naming
+If `--out` is not provided, the app auto-generates the filename as:
+`<mic>_YYYYMMDD_HHMMSS.rf64`
+
+Examples:
+- `spcmic_20260222_143015.rf64`
+- `zylia_20260222_143045.rf64`
+
+Auto naming requires `--mic spcmic|zylia`.
 
 ## USB stability checklist (sporadic clicks with zero XRUNs)
 If you see kernel logs like:

@@ -9,7 +9,10 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
+#include <iomanip>
 #include <mutex>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -24,12 +27,13 @@ enum class MicKind {
 
 struct Options {
   std::string device = "default";
-  std::string out_path = "capture.rf64";
+  std::string out_path;
   int rate = 48000;
   int channels = 84;
   MicKind mic = MicKind::kUnspecified;
   snd_pcm_format_t format = SND_PCM_FORMAT_S24_3LE;
   snd_pcm_access_t access = SND_PCM_ACCESS_RW_INTERLEAVED;
+  bool out_overridden = false;
   bool device_overridden = false;
   bool channels_overridden = false;
   bool access_overridden = false;
@@ -49,6 +53,30 @@ void HandleSignal(int) {
   g_running.store(false);
 }
 
+const char* MicKindToString(MicKind mic) {
+  if (mic == MicKind::kSpcmic) {
+    return "spcmic";
+  }
+  if (mic == MicKind::kZylia) {
+    return "zylia";
+  }
+  return "";
+}
+
+std::string BuildAutoOutPath(MicKind mic) {
+  const char* mic_name = MicKindToString(mic);
+  std::time_t now = std::time(nullptr);
+  std::tm tm_now{};
+#ifdef _WIN32
+  localtime_s(&tm_now, &now);
+#else
+  localtime_r(&now, &tm_now);
+#endif
+  std::ostringstream oss;
+  oss << mic_name << "_" << std::put_time(&tm_now, "%Y%m%d_%H%M%S") << ".rf64";
+  return oss.str();
+}
+
 void PrintUsage(const char* exe) {
   std::printf(
       "Usage: %s [options]\n"
@@ -57,7 +85,7 @@ void PrintUsage(const char* exe) {
       "\n"
       "Options:\n"
       "  -d, --device <name>     ALSA device (default: \"default\")\n"
-      "  -o, --out <path>        Output RF64 file (default: capture.rf64)\n"
+      "  -o, --out <path>        Output RF64 file (default: auto name)\n"
       "  -r, --rate <48000|96000> Sample rate (default: 48000)\n"
       "  -c, --channels <n>      Channel count (default: 84)\n"
       "  --mic <spcmic|zylia>    Mic preset for device/channels/access\n"
@@ -104,6 +132,7 @@ bool ParseArgs(int argc, char** argv, Options* out) {
       const char* v = need_value(arg.c_str());
       if (!v) return false;
       out->out_path = v;
+      out->out_overridden = true;
       continue;
     }
     if (arg == "-r" || arg == "--rate") {
@@ -348,6 +377,16 @@ int main(int argc, char** argv) {
   if (opt.list_devices) {
     ListAlsaDevices();
     return 0;
+  }
+
+  if (!opt.out_overridden) {
+    if (opt.mic == MicKind::kUnspecified) {
+      std::fprintf(stderr,
+                   "Auto filename requires --mic spcmic|zylia "
+                   "(or provide --out)\n");
+      return 1;
+    }
+    opt.out_path = BuildAutoOutPath(opt.mic);
   }
 
   std::signal(SIGINT, HandleSignal);
