@@ -66,3 +66,18 @@ Use ALSA `arecord` for capture and pipe raw PCM into the RF64 writer:
 arecord -D hw:CARD=ZM13E,DEV=0 -f S24_3LE -c 19 -r 48000 -t raw | \
   ./build/rpi_multirec --stdin-raw --rate 48000 --channels 19 --format s24 --out /home/pi/zm1.rf64
 ```
+## Rebuild Zylia driver DKMS cleanly
+Source location: /usr/src/zm-1-driver-2.7.0/linux/src
+
+sudo dkms remove -m zm-1-driver -v 2.7.0 --all || true
+sudo dkms add -m zm-1-driver -v 2.7.0
+sudo dkms build -m zm-1-driver -v 2.7.0
+sudo dkms install -m zm-1-driver -v 2.7.0
+sudo dpkg --configure -a
+
+Load the module:
+sudo modprobe zm_1_driver
+
+Verify it loaded:
+lsmod | grep zm_1_driver
+dmesg | tail -n 50

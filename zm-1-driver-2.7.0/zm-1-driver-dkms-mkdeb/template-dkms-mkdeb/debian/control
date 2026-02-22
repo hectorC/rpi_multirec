@@ -1,0 +1,15 @@
+Source: DEBIAN_PACKAGE-dkms
+Section: misc
+Priority: optional
+Maintainer: Zylia Sp. z o. o.
+Build-Depends: debhelper (>= 7), dkms
+Standards-Version: 3.8.1
+
+Package: DEBIAN_PACKAGE-dkms
+Architecture: all
+Depends: libftdi1-2, 
+ libstdc++6 (>= 4.8.3),
+ libsndfile1 (>= 1.0),
+ libasound2 (>=1.1.0-0ubuntu1),
+ dkms (>= 1.95), ${misc:Depends}
+Description: Zylia ZM-1 driver.

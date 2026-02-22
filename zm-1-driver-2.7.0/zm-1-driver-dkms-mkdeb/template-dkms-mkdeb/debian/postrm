@@ -1,0 +1,20 @@
+#!/bin/bash
+
+NAME=MODULE_NAME
+
+# Substitute "-" to "_" in kernel module name
+NEW_NAME=${NAME//-/_}
+
+if lsmod | grep $NEW_NAME &> /dev/null
+then
+    
+    # Try to remove it
+    echo "Removing the module from kernel..."
+    
+    if [ $(sudo $SHELL -c 'rmmod '$NEW_NAME'; echo $?') -ne 0 ]
+    then
+        echo "Cannot remove the kernel module! Probably the microphone array is connected to the PC. Please disconnect it."
+        exit $?
+    fi
+
+fi
