@@ -16,13 +16,23 @@
 
 namespace {
 
+enum class MicKind {
+  kUnspecified,
+  kSpcmic,
+  kZylia,
+};
+
 struct Options {
   std::string device = "default";
   std::string out_path = "capture.rf64";
   int rate = 48000;
   int channels = 84;
+  MicKind mic = MicKind::kUnspecified;
   snd_pcm_format_t format = SND_PCM_FORMAT_S24_3LE;
   snd_pcm_access_t access = SND_PCM_ACCESS_RW_INTERLEAVED;
+  bool device_overridden = false;
+  bool channels_overridden = false;
+  bool access_overridden = false;
   bool explicit_start = true;
   bool stdin_raw = false;
   int buffer_ms = 200;
@@ -50,6 +60,7 @@ void PrintUsage(const char* exe) {
       "  -o, --out <path>        Output RF64 file (default: capture.rf64)\n"
       "  -r, --rate <48000|96000> Sample rate (default: 48000)\n"
       "  -c, --channels <n>      Channel count (default: 84)\n"
+      "  --mic <spcmic|zylia>    Mic preset for device/channels/access\n"
       "  -f, --format <s16|s24>  Sample format (default: s24)\n"
       "  --access <rw|mmap>      ALSA access type (default: rw)\n"
       "  --start <auto|explicit> Stream start mode (default: explicit)\n"
@@ -86,6 +97,7 @@ bool ParseArgs(int argc, char** argv, Options* out) {
       const char* v = need_value(arg.c_str());
       if (!v) return false;
       out->device = v;
+      out->device_overridden = true;
       continue;
     }
     if (arg == "-o" || arg == "--out") {
@@ -104,6 +116,20 @@ bool ParseArgs(int argc, char** argv, Options* out) {
       const char* v = need_value(arg.c_str());
       if (!v) return false;
       out->channels = std::atoi(v);
+      out->channels_overridden = true;
+      continue;
+    }
+    if (arg == "--mic") {
+      const char* v = need_value(arg.c_str());
+      if (!v) return false;
+      if (std::strcmp(v, "spcmic") == 0) {
+        out->mic = MicKind::kSpcmic;
+      } else if (std::strcmp(v, "zylia") == 0) {
+        out->mic = MicKind::kZylia;
+      } else {
+        std::fprintf(stderr, "Unknown mic: %s (use spcmic or zylia)\n", v);
+        return false;
+      }
       continue;
     }
     if (arg == "-f" || arg == "--format") {
@@ -130,6 +156,7 @@ bool ParseArgs(int argc, char** argv, Options* out) {
         std::fprintf(stderr, "Unknown access: %s (use rw or mmap)\n", v);
         return false;
       }
+      out->access_overridden = true;
       continue;
     }
     if (arg == "--start") {
@@ -177,6 +204,28 @@ bool ParseArgs(int argc, char** argv, Options* out) {
     std::fprintf(stderr, "Unknown arg: %s\n", arg.c_str());
     PrintUsage(argv[0]);
     return false;
+  }
+
+  if (out->mic == MicKind::kSpcmic) {
+    if (!out->device_overridden) {
+      out->device = "hw:CARD=s02E5D5,DEV=0";
+    }
+    if (!out->channels_overridden) {
+      out->channels = 84;
+    }
+    if (!out->access_overridden) {
+      out->access = SND_PCM_ACCESS_RW_INTERLEAVED;
+    }
+  } else if (out->mic == MicKind::kZylia) {
+    if (!out->device_overridden) {
+      out->device = "hw:CARD=ZM13E,DEV=0";
+    }
+    if (!out->channels_overridden) {
+      out->channels = 19;
+    }
+    if (!out->access_overridden) {
+      out->access = SND_PCM_ACCESS_MMAP_INTERLEAVED;
+    }
   }
 
   if (out->rate != 48000 && out->rate != 96000) {

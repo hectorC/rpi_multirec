@@ -35,15 +35,29 @@ Example (96 kHz, larger ring buffer):
 - `--out <path>` output RF64 file
 - `--rate 48000|96000`
 - `--channels <n>` default 84
+- `--mic spcmic|zylia` mic preset for device/channels/access
 - `--format s16|s24` sample format (default s24)
 - `--access rw|mmap` ALSA access type (default rw)
 - `--start auto|explicit` stream start mode (default explicit)
 - `--stdin-raw` read raw PCM from stdin instead of ALSA
 - `--buffer-ms <ms>` ALSA buffer time (default 200)
 - `--period-ms <ms>` ALSA period time (default 50)
-- `--ring-ms <ms>` ring buffer time (default 2000)
+- `--ring-ms <ms>` ring buffer time (default 5000)
 - `--status-ms <ms>` print status every N ms (default 0=off)
 - `--list-devices` list ALSA PCM devices and exit
+
+## Mic presets
+`--mic spcmic` defaults:
+- `--device hw:CARD=s02E5D5,DEV=0`
+- `--channels 84`
+- `--access rw`
+
+`--mic zylia` defaults:
+- `--device hw:CARD=ZM13E,DEV=0`
+- `--channels 19`
+- `--access mmap`
+
+Explicit `--device`, `--channels`, and `--access` arguments override the preset values.
 
 ## USB stability checklist (sporadic clicks with zero XRUNs)
 If you see kernel logs like:
