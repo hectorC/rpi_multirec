@@ -27,7 +27,7 @@ struct Options {
   bool stdin_raw = false;
   int buffer_ms = 200;
   int period_ms = 50;
-  int ring_ms = 2000;
+  int ring_ms = 5000;
   int status_ms = 0;
   bool list_devices = false;
   bool show_help = false;
@@ -56,7 +56,7 @@ void PrintUsage(const char* exe) {
       "  --stdin-raw             Read raw PCM from stdin instead of ALSA\n"
       "  --buffer-ms <ms>        ALSA buffer time in ms (default: 200)\n"
       "  --period-ms <ms>        ALSA period time in ms (default: 50)\n"
-      "  --ring-ms <ms>          Ring buffer time in ms (default: 2000)\n"
+      "  --ring-ms <ms>          Ring buffer time in ms (default: 5000)\n"
       "  --status-ms <ms>        Print status every N ms (default: 0=off)\n"
       "  -L, --list-devices      List ALSA PCM devices and exit\n"
       "  -h, --help              Show this help\n",
