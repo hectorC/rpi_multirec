@@ -98,7 +98,16 @@ void PrintUsage(const char* exe) {
       "  --ring-ms <ms>          Ring buffer time in ms (default: 5000)\n"
       "  --status-ms <ms>        Print status every N ms (default: 0=off)\n"
       "  -L, --list-devices      List ALSA PCM devices and exit\n"
-      "  -h, --help              Show this help\n",
+      "  -h, --help              Show this help\n"
+      "\n"
+      "Mic presets:\n"
+      "  spcmic => device=hw:CARD=s02E5D5,DEV=0 channels=84 access=rw\n"
+      "  zylia  => device=hw:CARD=ZM13E,DEV=0   channels=19 access=mmap\n"
+      "  Explicit --device/--channels/--access override preset values.\n"
+      "\n"
+      "Auto naming:\n"
+      "  If --out is omitted: <mic>_YYYYMMDD_HHMMSS.rf64\n"
+      "  Auto naming requires --mic spcmic|zylia.\n",
       exe);
 }
 
