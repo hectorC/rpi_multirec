@@ -140,7 +140,9 @@ void PrintUsage(const char* exe) {
       "Waveshare HAT controls:\n"
       "  With --hat-ui the app starts in IDLE and waits for KEY2.\n"
       "  KEY1 = stop take (back to IDLE) | KEY2 = start recording\n"
-      "  KEY3 = backlight toggle\n",
+      "  KEY3 = backlight toggle\n"
+      "  Joystick LEFT/RIGHT (IDLE only) = select spcmic/zylia preset\n"
+      "  Joystick UP/DOWN (IDLE only) = select 96kHz/48kHz\n",
       exe);
 }
 
@@ -399,6 +401,8 @@ std::string FormatHms(uint64_t total_sec) {
 struct UiSnapshot {
   bool recording = false;
   std::string mic;
+  bool mic_connected = true;
+  bool finalize_pending = false;
   unsigned int rate = 0;
   int channels = 0;
   uint64_t xruns = 0;
@@ -518,12 +522,21 @@ class WaveshareHatUi {
     }
   }
 
-  void PollButtons(bool* start, bool* stop) {
+  void PollButtons(bool* start, bool* stop, bool* mic_left, bool* mic_right,
+                   bool* rate_up, bool* rate_down) {
     if (start) *start = false;
     if (stop) *stop = false;
+    if (mic_left) *mic_left = false;
+    if (mic_right) *mic_right = false;
+    if (rate_up) *rate_up = false;
+    if (rate_down) *rate_down = false;
     const int key1 = ReadGpio(btn_[0]);
     const int key2 = ReadGpio(btn_[1]);
     const int key3 = ReadGpio(btn_[2]);
+    const int joy_up = ReadGpio(btn_[3]);
+    const int joy_down = ReadGpio(btn_[4]);
+    const int joy_left = ReadGpio(btn_[5]);
+    const int joy_right = ReadGpio(btn_[6]);
     auto edge = [&](int idx, int value) -> bool {
       return value >= 0 && last_btn_[idx] == idle_btn_[idx] &&
              value != idle_btn_[idx];
@@ -539,62 +552,58 @@ class WaveshareHatUi {
       backlight_on_ = !backlight_on_;
       WriteGpio(bl_, backlight_on_ ? 1 : 0);
     }
+    if (mic_left && edge(5, joy_left)) {
+      *mic_left = true;
+    }
+    if (mic_right && edge(6, joy_right)) {
+      *mic_right = true;
+    }
+    if (rate_up && edge(3, joy_up)) {
+      *rate_up = true;
+    }
+    if (rate_down && edge(4, joy_down)) {
+      *rate_down = true;
+    }
     if (key1 >= 0) last_btn_[0] = key1;
     if (key2 >= 0) last_btn_[1] = key2;
     if (key3 >= 0) last_btn_[2] = key3;
+    if (joy_up >= 0) last_btn_[3] = joy_up;
+    if (joy_down >= 0) last_btn_[4] = joy_down;
+    if (joy_left >= 0) last_btn_[5] = joy_left;
+    if (joy_right >= 0) last_btn_[6] = joy_right;
   }
 
   bool Render(const UiSnapshot& snap) {
     Clear(kBlack);
+    const int margin = 12;
+    FillRect(126, 6, 16, 16, snap.recording ? kRed : kDarkGray);
+    DrawText(146, 6, snap.recording ? "REC" : "IDLE", kWhite, 3);
 
-    FillRect(6, 6, 14, 14, snap.recording ? kRed : kDarkGray);
-    DrawText(26, 6, snap.recording ? "REC" : "IDLE", kWhite, 2);
+    DrawText(margin, 22, "ELAP", kCyan, 2);
+    DrawText(margin, 43, FormatHms(snap.elapsed_sec),
+             snap.finalize_pending ? kRed : kYellow, 4);
 
-    std::time_t now = std::time(nullptr);
-    std::tm tm_now{};
-    localtime_r(&now, &tm_now);
-    char wall[16];
-    std::snprintf(wall, sizeof(wall), "%02d:%02d:%02d", tm_now.tm_hour,
-                  tm_now.tm_min, tm_now.tm_sec);
-    DrawText(6, 34, "TIME", kCyan, 1);
-    DrawText(66, 30, wall, kWhite, 2);
-
-    DrawText(6, 62, "ELAP", kCyan, 1);
-    DrawText(66, 58, FormatHms(snap.elapsed_sec), kYellow, 2);
-
-    DrawText(6, 90, "MIC", kCyan, 1);
-    DrawText(66, 90, snap.mic, kWhite, 1);
+    DrawText(margin, 122, "MIC", kCyan, 2);
+    DrawText(margin + 66, 122, snap.mic, snap.mic_connected ? kWhite : kRed, 2);
 
     char rate_ch[32];
-    std::snprintf(rate_ch, sizeof(rate_ch), "%uHz  CH:%d", snap.rate,
+    std::snprintf(rate_ch, sizeof(rate_ch), "%ukHz  CH:%d", snap.rate / 1000,
                   snap.channels);
-    DrawText(6, 110, rate_ch, kWhite, 1);
+    DrawText(margin, 146, rate_ch, kOrange, 2);
 
     char xr[32];
     std::snprintf(xr, sizeof(xr), "XRUN:%llu",
                   static_cast<unsigned long long>(snap.xruns));
-    DrawText(6, 130, xr, kWhite, 1);
+    DrawText(margin, 176, xr, snap.xruns > 0 ? kRed : kWhite, 2);
 
     char dr[32];
     std::snprintf(dr, sizeof(dr), "DROP:%lluMB",
                   static_cast<unsigned long long>(snap.dropped_bytes /
                                                   (1024 * 1024)));
-    DrawText(6, 148, dr, kWhite, 1);
+    DrawText(margin, 198, dr, snap.dropped_bytes > 0 ? kRed : kWhite, 2);
 
-    char rg[32];
-    std::snprintf(rg, sizeof(rg), "RING:%d%%", snap.ring_fill_pct);
-    DrawText(6, 166, rg, kWhite, 1);
-
-    const int bar_w = 220;
-    const int bar_fill = (bar_w * snap.ring_fill_pct) / 100;
-    FillRect(10, 190, bar_w, 14, kDarkGray);
-    if (bar_fill > 0) {
-      const uint16_t c =
-          (snap.ring_fill_pct < 70) ? kGreen : ((snap.ring_fill_pct < 90) ? kYellow : kRed);
-      FillRect(10, 190, bar_fill, 14, c);
-    }
-
-    DrawText(6, 212, "KEY1:STOP KEY2:REC KEY3:BL", kDarkGray, 1);
+    // DrawText(margin, 184, "KEY1:STOP KEY2:REC KEY3:BL", kDarkGray, 1);
+    // DrawText(margin, 202, "L SPC R ZYL  U96 D48", kDarkGray, 1);
     return Flush();
   }
 
@@ -633,6 +642,7 @@ class WaveshareHatUi {
   static constexpr uint16_t kYellow = 0xFFE0;
   static constexpr uint16_t kCyan = 0x07FF;
   static constexpr uint16_t kDarkGray = 0x39E7;
+  static constexpr uint16_t kOrange = 0xFD20;
 
   bool WriteCmd(uint8_t cmd, const uint8_t* data, size_t data_len) {
     if (!WriteGpio(dc_, 0) || !SpiWrite(&cmd, 1)) {
@@ -910,6 +920,8 @@ class WaveshareHatUi {
 struct UiSnapshot {
   bool recording = false;
   std::string mic;
+  bool mic_connected = true;
+  bool finalize_pending = false;
   unsigned int rate = 0;
   int channels = 0;
   uint64_t xruns = 0;
@@ -923,9 +935,14 @@ class WaveshareHatUi {
   bool Init() { return false; }
   const std::string& LastError() const { return last_error_; }
   void Shutdown() {}
-  void PollButtons(bool* start, bool* stop) {
+  void PollButtons(bool* start, bool* stop, bool* mic_left, bool* mic_right,
+                   bool* rate_up, bool* rate_down) {
     if (start) *start = false;
     if (stop) *stop = false;
+    if (mic_left) *mic_left = false;
+    if (mic_right) *mic_right = false;
+    if (rate_up) *rate_up = false;
+    if (rate_down) *rate_down = false;
   }
   bool Render(const UiSnapshot&) { return false; }
  private:
@@ -989,7 +1006,7 @@ int main(int argc, char** argv) {
   }
 
   if (!opt.out_overridden) {
-    if (opt.mic == MicKind::kUnspecified) {
+    if (!opt.hat_ui && opt.mic == MicKind::kUnspecified) {
       std::fprintf(stderr,
                    "Auto filename requires --mic spcmic|zylia "
                    "(or provide --out)\n");
@@ -1007,12 +1024,62 @@ int main(int argc, char** argv) {
   snd_pcm_uframes_t period_size = 0;
   snd_pcm_uframes_t buffer_size = 0;
   unsigned int actual_rate = static_cast<unsigned int>(opt.rate);
+  MicKind selected_mic =
+      (opt.mic == MicKind::kUnspecified) ? MicKind::kSpcmic : opt.mic;
+  std::string current_device = opt.device;
+  int current_channels = opt.channels;
+  snd_pcm_access_t current_access = opt.access;
+  auto ApplyMicPreset = [&](MicKind mic) {
+    selected_mic = mic;
+    if (mic == MicKind::kSpcmic) {
+      current_device = "hw:CARD=s02E5D5,DEV=0";
+      current_channels = 84;
+      current_access = SND_PCM_ACCESS_RW_INTERLEAVED;
+    } else if (mic == MicKind::kZylia) {
+      current_device = "hw:CARD=ZM13E,DEV=0";
+      current_channels = 19;
+      current_access = SND_PCM_ACCESS_MMAP_INTERLEAVED;
+    }
+  };
+  if (opt.hat_ui &&
+      (selected_mic == MicKind::kSpcmic || selected_mic == MicKind::kZylia)) {
+    ApplyMicPreset(selected_mic);
+  }
 
-  if (!opt.stdin_raw) {
-    int err = snd_pcm_open(&pcm, opt.device.c_str(), SND_PCM_STREAM_CAPTURE, 0);
+  const int bytes_per_sample =
+      (opt.format == SND_PCM_FORMAT_S16_LE) ? 2 : 3;
+  int bytes_per_frame = 0;
+  size_t period_bytes = 0;
+  size_t ring_bytes = 0;
+  std::vector<uint8_t> buffer;
+  std::atomic<bool> mic_available{true};
+
+  auto SetupCapture = [&]() -> bool {
+    auto SetFallbackTiming = [&]() {
+      const uint64_t frames =
+          (static_cast<uint64_t>(opt.rate) * opt.period_ms) / 1000;
+      period_size = static_cast<snd_pcm_uframes_t>(frames > 0 ? frames : 1);
+      buffer_size = period_size * 4;
+      actual_rate = static_cast<unsigned int>(opt.rate);
+    };
+
+    if (opt.stdin_raw) {
+      SetFallbackTiming();
+      return true;
+    }
+
+    if (pcm) {
+      snd_pcm_close(pcm);
+      pcm = nullptr;
+    }
+
+    int err =
+        snd_pcm_open(&pcm, current_device.c_str(), SND_PCM_STREAM_CAPTURE, 0);
     if (err < 0) {
-      std::fprintf(stderr, "snd_pcm_open failed: %s\n", snd_strerror(err));
-      return 1;
+      std::fprintf(stderr, "snd_pcm_open failed (%s): %s\n",
+                   current_device.c_str(), snd_strerror(err));
+      SetFallbackTiming();
+      return false;
     }
 
     snd_pcm_hw_params_t* params = nullptr;
@@ -1027,25 +1094,28 @@ int main(int argc, char** argv) {
       return true;
     };
 
-    if (!Check(snd_pcm_hw_params_set_access(pcm, params, opt.access),
+    if (!Check(snd_pcm_hw_params_set_access(pcm, params, current_access),
                "snd_pcm_hw_params_set_access") ||
         !Check(snd_pcm_hw_params_set_format(pcm, params, opt.format),
                "snd_pcm_hw_params_set_format") ||
-        !Check(snd_pcm_hw_params_set_channels(pcm, params, opt.channels),
+        !Check(snd_pcm_hw_params_set_channels(pcm, params, current_channels),
                "snd_pcm_hw_params_set_channels")) {
       snd_pcm_hw_params_free(params);
       snd_pcm_close(pcm);
-      return 1;
+      pcm = nullptr;
+      SetFallbackTiming();
+      return false;
     }
 
     unsigned int rate = static_cast<unsigned int>(opt.rate);
-    // Rate resample may not be supported on all devices; ignore if it fails.
     snd_pcm_hw_params_set_rate_resample(pcm, params, 0);
     if (!Check(snd_pcm_hw_params_set_rate_near(pcm, params, &rate, nullptr),
                "snd_pcm_hw_params_set_rate_near")) {
       snd_pcm_hw_params_free(params);
       snd_pcm_close(pcm);
-      return 1;
+      pcm = nullptr;
+      SetFallbackTiming();
+      return false;
     }
 
     unsigned int period_time = static_cast<unsigned int>(opt.period_ms) * 1000;
@@ -1054,7 +1124,9 @@ int main(int argc, char** argv) {
                "snd_pcm_hw_params_set_period_time_near")) {
       snd_pcm_hw_params_free(params);
       snd_pcm_close(pcm);
-      return 1;
+      pcm = nullptr;
+      SetFallbackTiming();
+      return false;
     }
 
     unsigned int buffer_time = static_cast<unsigned int>(opt.buffer_ms) * 1000;
@@ -1063,7 +1135,9 @@ int main(int argc, char** argv) {
                "snd_pcm_hw_params_set_buffer_time_near")) {
       snd_pcm_hw_params_free(params);
       snd_pcm_close(pcm);
-      return 1;
+      pcm = nullptr;
+      SetFallbackTiming();
+      return false;
     }
 
     err = snd_pcm_hw_params(pcm, params);
@@ -1071,7 +1145,9 @@ int main(int argc, char** argv) {
       std::fprintf(stderr, "snd_pcm_hw_params failed: %s\n", snd_strerror(err));
       snd_pcm_hw_params_free(params);
       snd_pcm_close(pcm);
-      return 1;
+      pcm = nullptr;
+      SetFallbackTiming();
+      return false;
     }
 
     snd_pcm_hw_params_get_period_size(params, &period_size, nullptr);
@@ -1079,48 +1155,61 @@ int main(int argc, char** argv) {
     snd_pcm_hw_params_get_rate(params, &actual_rate, nullptr);
     snd_pcm_hw_params_free(params);
 
+    snd_pcm_sw_params_t* swparams = nullptr;
+    snd_pcm_sw_params_malloc(&swparams);
+    snd_pcm_sw_params_current(pcm, swparams);
+    snd_pcm_sw_params_set_start_threshold(pcm, swparams, 1);
+    snd_pcm_sw_params_set_avail_min(pcm, swparams, period_size);
+    err = snd_pcm_sw_params(pcm, swparams);
+    snd_pcm_sw_params_free(swparams);
+    if (err < 0) {
+      std::fprintf(stderr, "snd_pcm_sw_params failed: %s\n", snd_strerror(err));
+      snd_pcm_close(pcm);
+      pcm = nullptr;
+      SetFallbackTiming();
+      return false;
+    }
+
     if (actual_rate != static_cast<unsigned int>(opt.rate)) {
       std::fprintf(stderr, "Warning: requested rate %d, got %u\n", opt.rate,
                    actual_rate);
     }
-  } else {
-    const uint64_t frames =
-        (static_cast<uint64_t>(opt.rate) * opt.period_ms) / 1000;
-    period_size = static_cast<snd_pcm_uframes_t>(frames > 0 ? frames : 1);
-    buffer_size = period_size * 4;
-  }
+    return true;
+  };
 
-  const int bytes_per_sample =
-      (opt.format == SND_PCM_FORMAT_S16_LE) ? 2 : 3;
-  const int bytes_per_frame = opt.channels * bytes_per_sample;
-
-  if (period_size == 0) {
-    std::fprintf(stderr, "Invalid period size\n");
-    if (pcm) {
-      snd_pcm_close(pcm);
+  auto RefreshDerivedSizes = [&]() -> bool {
+    if (period_size == 0) {
+      std::fprintf(stderr, "Invalid period size\n");
+      return false;
     }
+    bytes_per_frame = current_channels * bytes_per_sample;
+    period_bytes = static_cast<size_t>(period_size) * bytes_per_frame;
+    buffer.resize(period_bytes);
+    ring_bytes = static_cast<size_t>(actual_rate) * bytes_per_frame *
+                 static_cast<size_t>(opt.ring_ms) / 1000;
+    if (ring_bytes < period_bytes * 2) {
+      ring_bytes = period_bytes * 2;
+    }
+    ring_bytes -= ring_bytes % bytes_per_frame;
+    return true;
+  };
+
+  const bool initial_setup_ok = SetupCapture();
+  mic_available.store(initial_setup_ok);
+  if (!RefreshDerivedSizes()) {
     return 1;
   }
-
-  std::vector<uint8_t> buffer;
-  buffer.resize(static_cast<size_t>(period_size) * bytes_per_frame);
-
-  SF_INFO info_template{};
-  info_template.samplerate = static_cast<int>(actual_rate);
-  info_template.channels = opt.channels;
-  info_template.format = SF_FORMAT_RF64 |
-                         ((opt.format == SND_PCM_FORMAT_S16_LE)
-                              ? SF_FORMAT_PCM_16
-                              : SF_FORMAT_PCM_24);
-
-  size_t ring_bytes = static_cast<size_t>(actual_rate) * bytes_per_frame *
-                      static_cast<size_t>(opt.ring_ms) / 1000;
-  const size_t period_bytes =
-      static_cast<size_t>(period_size) * bytes_per_frame;
-  if (ring_bytes < period_bytes * 2) {
-    ring_bytes = period_bytes * 2;
+  if (!initial_setup_ok) {
+    if (!opt.hat_ui) {
+      if (pcm) {
+        snd_pcm_close(pcm);
+      }
+      return 1;
+    }
+    std::fprintf(stdout,
+                 "Selected mic is not connected. Mic label will be red and "
+                 "recording is disabled until available.\n");
   }
-  ring_bytes -= ring_bytes % bytes_per_frame;
 
   RingBuffer ring(ring_bytes);
   std::mutex ring_mutex;
@@ -1134,22 +1223,30 @@ int main(int argc, char** argv) {
   std::atomic<uint64_t> dropped_bytes{0};
   std::atomic<uint64_t> xrun_count{0};
   std::atomic<bool> recording_active{false};
+  std::atomic<bool> finalize_in_progress{false};
   std::atomic<bool> start_requested{false};
   std::atomic<bool> stop_requested{false};
+  std::atomic<bool> mic_left_requested{false};
+  std::atomic<bool> mic_right_requested{false};
+  std::atomic<bool> rate_up_requested{false};
+  std::atomic<bool> rate_down_requested{false};
   std::atomic<int64_t> record_start_ms{0};
+  std::atomic<uint64_t> finalize_elapsed_sec{0};
 
   uint64_t take_count = 0;
   std::string current_out_path;
 
   const char* fmt_label =
       (opt.format == SND_PCM_FORMAT_S16_LE) ? "S16_LE" : "S24_3LE";
-  const char* access_label =
-      (opt.access == SND_PCM_ACCESS_MMAP_INTERLEAVED) ? "MMAP" : "RW";
   const char* start_label = opt.explicit_start ? "explicit" : "auto";
+  auto AccessLabel = [&]() -> const char* {
+    return (current_access == SND_PCM_ACCESS_MMAP_INTERLEAVED) ? "MMAP" : "RW";
+  };
   const std::string out_preview =
       opt.out_overridden
           ? opt.out_path
-          : (std::string(MicKindToString(opt.mic)) + "_YYYYMMDD_HHMMSS.rf64");
+          : (std::string(MicKindToString(selected_mic)) +
+             "_YYYYMMDD_HHMMSS.rf64");
 
   if (opt.hat_ui) {
     std::fprintf(stdout,
@@ -1159,9 +1256,9 @@ int main(int argc, char** argv) {
                  "Output file: %s\n"
                  "Ring buffer: %lu ms (~%lu MB)\n"
                  "Press KEY2 to start, KEY1 to stop, Ctrl+C to exit.\n",
-                 opt.device.c_str(), static_cast<unsigned long>(period_size),
-                 static_cast<unsigned long>(buffer_size), opt.channels,
-                 actual_rate, fmt_label, access_label, start_label,
+                 current_device.c_str(), static_cast<unsigned long>(period_size),
+                 static_cast<unsigned long>(buffer_size), current_channels,
+                 actual_rate, fmt_label, AccessLabel(), start_label,
                  out_preview.c_str(), static_cast<unsigned long>(opt.ring_ms),
                  static_cast<unsigned long>(ring_bytes / (1024 * 1024)));
   } else if (opt.stdin_raw) {
@@ -1170,7 +1267,7 @@ int main(int argc, char** argv) {
                  "Input: stdin raw PCM | period: %lu frames\n"
                  "Ring buffer: %lu ms (~%lu MB)\n"
                  "Press Ctrl+C to stop...\n",
-                 opt.channels, actual_rate, fmt_label, opt.out_path.c_str(),
+                 current_channels, actual_rate, fmt_label, opt.out_path.c_str(),
                  static_cast<unsigned long>(period_size),
                  static_cast<unsigned long>(opt.ring_ms),
                  static_cast<unsigned long>(ring_bytes / (1024 * 1024)));
@@ -1181,27 +1278,11 @@ int main(int argc, char** argv) {
                  "Access: %s | start: %s\n"
                  "Ring buffer: %lu ms (~%lu MB)\n"
                  "Press Ctrl+C to stop...\n",
-                 opt.channels, actual_rate, fmt_label, opt.out_path.c_str(),
-                 opt.device.c_str(), static_cast<unsigned long>(period_size),
-                 static_cast<unsigned long>(buffer_size), access_label,
+                 current_channels, actual_rate, fmt_label, opt.out_path.c_str(),
+                 current_device.c_str(), static_cast<unsigned long>(period_size),
+                 static_cast<unsigned long>(buffer_size), AccessLabel(),
                  start_label, static_cast<unsigned long>(opt.ring_ms),
                  static_cast<unsigned long>(ring_bytes / (1024 * 1024)));
-  }
-
-  if (!opt.stdin_raw) {
-    snd_pcm_sw_params_t* swparams = nullptr;
-    snd_pcm_sw_params_malloc(&swparams);
-    snd_pcm_sw_params_current(pcm, swparams);
-    snd_pcm_sw_params_set_start_threshold(pcm, swparams, 1);
-    snd_pcm_sw_params_set_avail_min(pcm, swparams, period_size);
-    const int err = snd_pcm_sw_params(pcm, swparams);
-    snd_pcm_sw_params_free(swparams);
-    if (err < 0) {
-      std::fprintf(stderr, "snd_pcm_sw_params failed: %s\n",
-                   snd_strerror(err));
-      snd_pcm_close(pcm);
-      return 1;
-    }
   }
 
   auto next_status = std::chrono::steady_clock::now();
@@ -1265,7 +1346,7 @@ int main(int argc, char** argv) {
     } else {
       current_out_path =
           opt.out_overridden ? BuildManualTakePath(opt.out_path, take_index)
-                             : BuildAutoOutPath(opt.mic);
+                             : BuildAutoOutPath(selected_mic);
     }
 
     {
@@ -1275,7 +1356,12 @@ int main(int argc, char** argv) {
     dropped_bytes.store(0);
     xrun_count.store(0);
 
-    SF_INFO info = info_template;
+    SF_INFO info{};
+    info.samplerate = static_cast<int>(actual_rate);
+    info.channels = current_channels;
+    info.format = SF_FORMAT_RF64 |
+                  ((opt.format == SND_PCM_FORMAT_S16_LE) ? SF_FORMAT_PCM_16
+                                                         : SF_FORMAT_PCM_24);
     snd = sf_open(current_out_path.c_str(), SFM_WRITE, &info);
     if (!snd) {
       std::fprintf(stderr, "sf_open failed for %s: %s\n",
@@ -1305,6 +1391,8 @@ int main(int argc, char** argv) {
 
     start_writer();
     recording_active.store(true);
+    finalize_in_progress.store(false);
+    finalize_elapsed_sec.store(0);
     record_start_ms.store(now_ms());
     next_status = std::chrono::steady_clock::now();
     ++take_count;
@@ -1317,12 +1405,19 @@ int main(int argc, char** argv) {
       return;
     }
 
+    const int64_t start_ms = record_start_ms.load();
+    if (start_ms > 0) {
+      const int64_t delta_ms = std::max<int64_t>(0, now_ms() - start_ms);
+      finalize_elapsed_sec.store(static_cast<uint64_t>(delta_ms / 1000));
+    } else {
+      finalize_elapsed_sec.store(0);
+    }
+    finalize_in_progress.store(true);
     if (!opt.stdin_raw && pcm) {
       snd_pcm_drop(pcm);
     }
 
     recording_active.store(false);
-    record_start_ms.store(0);
     stop_writer();
 
     if (snd) {
@@ -1338,16 +1433,19 @@ int main(int argc, char** argv) {
                  current_out_path.c_str(),
                  static_cast<unsigned long long>(xrun_count.load()),
                  static_cast<unsigned long long>(dropped_bytes.load()));
+    record_start_ms.store(0);
+    finalize_elapsed_sec.store(0);
+    finalize_in_progress.store(false);
   };
 
-  const std::string ui_mic_name =
-      (opt.mic == MicKind::kUnspecified) ? "custom" : MicKindToString(opt.mic);
   auto make_ui_snapshot = [&]() -> UiSnapshot {
     UiSnapshot snap;
     snap.recording = recording_active.load();
-    snap.mic = ui_mic_name;
+    snap.finalize_pending = finalize_in_progress.load();
+    snap.mic = MicKindToString(selected_mic);
+    snap.mic_connected = mic_available.load();
     snap.rate = actual_rate;
-    snap.channels = opt.channels;
+    snap.channels = current_channels;
     snap.xruns = xrun_count.load();
     snap.dropped_bytes = dropped_bytes.load();
     {
@@ -1363,6 +1461,8 @@ int main(int argc, char** argv) {
         const int64_t delta_ms = std::max<int64_t>(0, now_ms() - start_ms);
         snap.elapsed_sec = static_cast<uint64_t>(delta_ms / 1000);
       }
+    } else if (snap.finalize_pending) {
+      snap.elapsed_sec = finalize_elapsed_sec.load();
     }
     return snap;
   };
@@ -1388,12 +1488,30 @@ int main(int argc, char** argv) {
       while (g_running.load()) {
         bool start_evt = false;
         bool stop_evt = false;
-        hat_ui->PollButtons(&start_evt, &stop_evt);
-        if (start_evt) {
+        bool mic_left_evt = false;
+        bool mic_right_evt = false;
+        bool rate_up_evt = false;
+        bool rate_down_evt = false;
+        hat_ui->PollButtons(&start_evt, &stop_evt, &mic_left_evt,
+                            &mic_right_evt, &rate_up_evt, &rate_down_evt);
+        if (start_evt && !recording_active.load() &&
+            !finalize_in_progress.load()) {
           start_requested.store(true);
         }
         if (stop_evt) {
           stop_requested.store(true);
+        }
+        if (mic_left_evt && !recording_active.load()) {
+          mic_left_requested.store(true);
+        }
+        if (mic_right_evt && !recording_active.load()) {
+          mic_right_requested.store(true);
+        }
+        if (rate_up_evt && !recording_active.load()) {
+          rate_up_requested.store(true);
+        }
+        if (rate_down_evt && !recording_active.load()) {
+          rate_down_requested.store(true);
         }
         hat_ui->Render(make_ui_snapshot());
         std::this_thread::sleep_for(std::chrono::milliseconds(150));
@@ -1419,9 +1537,59 @@ int main(int argc, char** argv) {
 
   while (g_running.load()) {
     if (opt.hat_ui && !recording_active.load()) {
+      bool mic_changed = false;
+      bool rate_changed = false;
+      if (mic_left_requested.exchange(false)) {
+        ApplyMicPreset(MicKind::kSpcmic);
+        mic_changed = true;
+      }
+      if (mic_right_requested.exchange(false)) {
+        ApplyMicPreset(MicKind::kZylia);
+        mic_changed = true;
+      }
+      if (rate_up_requested.exchange(false) && opt.rate != 96000) {
+        opt.rate = 96000;
+        rate_changed = true;
+      }
+      if (rate_down_requested.exchange(false) && opt.rate != 48000) {
+        opt.rate = 48000;
+        rate_changed = true;
+      }
+
+      if (mic_changed || rate_changed) {
+        const bool setup_ok = SetupCapture();
+        mic_available.store(setup_ok);
+        if (!RefreshDerivedSizes()) {
+          std::fprintf(stderr, "Failed to update capture sizes in idle mode\n");
+          g_running.store(false);
+          break;
+        }
+        {
+          std::lock_guard<std::mutex> lock(ring_mutex);
+          ring = RingBuffer(ring_bytes);
+        }
+        if (setup_ok) {
+          std::fprintf(stdout, "Selected: %s | %d Hz | %d ch | %s\n",
+                       MicKindToString(selected_mic), opt.rate,
+                       current_channels, AccessLabel());
+        } else {
+          std::fprintf(stdout,
+                       "Selected: %s | %d Hz (mic not connected, recording "
+                       "disabled)\n",
+                       MicKindToString(selected_mic), opt.rate);
+        }
+      }
+
       if (start_requested.exchange(false)) {
+        if (!mic_available.load()) {
+          std::fprintf(stdout,
+                       "Cannot start: selected mic is not connected.\n");
+          std::this_thread::sleep_for(std::chrono::milliseconds(20));
+          continue;
+        }
         if (!start_take()) {
           std::fprintf(stderr, "Failed to start take\n");
+          mic_available.store(false);
         }
       }
       stop_requested.store(false);
@@ -1471,7 +1639,7 @@ int main(int argc, char** argv) {
       }
     } else {
       snd_pcm_sframes_t frames =
-          (opt.access == SND_PCM_ACCESS_MMAP_INTERLEAVED)
+          (current_access == SND_PCM_ACCESS_MMAP_INTERLEAVED)
               ? snd_pcm_mmap_readi(pcm, buffer.data(), period_size)
               : snd_pcm_readi(pcm, buffer.data(), period_size);
       if (frames == -EPIPE) {

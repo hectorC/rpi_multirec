@@ -78,7 +78,12 @@ Current behavior:
 - `KEY2` starts recording.
 - `KEY1` stops the current take and returns to `IDLE` (multi-take session).
 - `KEY3` toggles LCD backlight.
-- Display shows recording state, wall time, elapsed time, mic preset/custom, rate/channels, XRUNs, dropped MB, and ring usage bar.
+- Joystick `LEFT/RIGHT` in `IDLE` selects `spcmic`/`zylia` preset for the next take.
+- Joystick `UP/DOWN` in `IDLE` selects `96 kHz`/`48 kHz`.
+- If the selected mic is not connected, the mic label is shown in red and recording start is disabled.
+- After `KEY1` stop, a new take cannot start until buffered audio is fully written and the file is closed.
+- During stop/finalize, elapsed time is held and shown in red; it resets to zero only after finalize completes.
+- Display shows recording state, elapsed time, mic preset/custom, rate/channels, XRUNs, and dropped MB.
 - Multiple takes are supported in one app run.
 - With auto naming, each take gets a fresh `<mic>_YYYYMMDD_HHMMSS.rf64` file.
 - If `--out` is provided, take 1 uses that filename and take 2+ use `_takeNNN` suffixes.
