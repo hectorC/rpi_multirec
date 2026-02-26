@@ -10,7 +10,7 @@
 Install dependencies:
 ```bash
 sudo apt update
-sudo apt install -y build-essential cmake pkg-config libasound2-dev libsndfile1-dev
+sudo apt install -y build-essential cmake pkg-config libasound2-dev libsndfile1-dev libgpiod-dev
 ```
 
 Configure and build:
@@ -40,6 +40,7 @@ Example (96 kHz, larger ring buffer):
 - `--access rw|mmap` ALSA access type (default rw)
 - `--start auto|explicit` stream start mode (default explicit)
 - `--stdin-raw` read raw PCM from stdin instead of ALSA
+- `--hat-ui` enable Waveshare 1.3inch LCD HAT status UI
 - `--buffer-ms <ms>` ALSA buffer time (default 200)
 - `--period-ms <ms>` ALSA period time (default 50)
 - `--ring-ms <ms>` ring buffer time (default 5000)
@@ -68,6 +69,29 @@ Examples:
 - `zylia_20260222_143045.rf64`
 
 Auto naming requires `--mic spcmic|zylia`.
+
+## Waveshare 1.3inch LCD HAT
+The app supports the Waveshare SPI HAT with `--hat-ui`.
+
+Current behavior:
+- App starts in `IDLE` when `--hat-ui` is enabled.
+- `KEY2` starts recording.
+- `KEY1` stops the current take and returns to `IDLE` (multi-take session).
+- `KEY3` toggles LCD backlight.
+- Display shows recording state, wall time, elapsed time, mic preset/custom, rate/channels, XRUNs, dropped MB, and ring usage bar.
+- Multiple takes are supported in one app run.
+- With auto naming, each take gets a fresh `<mic>_YYYYMMDD_HHMMSS.rf64` file.
+- If `--out` is provided, take 1 uses that filename and take 2+ use `_takeNNN` suffixes.
+
+Linux requirements:
+- SPI enabled (`/dev/spidev0.0` must exist).
+- GPIO and SPI device access permissions (`libgpiod` + `/dev/spidev0.0`).
+- If permissions block access, run with `sudo`.
+
+Example:
+```bash
+./build/rpi_multirec --mic spcmic --rate 48000 --hat-ui --status-ms 1000
+```
 
 ## USB stability checklist (sporadic clicks with zero XRUNs)
 If you see kernel logs like:

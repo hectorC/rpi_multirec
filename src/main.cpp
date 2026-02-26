@@ -1,7 +1,9 @@
 #include <alsa/asoundlib.h>
 #include <sndfile.h>
 
+#include <algorithm>
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <condition_variable>
 #include <csignal>
@@ -11,11 +13,20 @@
 #include <cstring>
 #include <ctime>
 #include <iomanip>
+#include <memory>
 #include <mutex>
 #include <sstream>
 #include <string>
 #include <thread>
 #include <vector>
+
+#ifdef __linux__
+#include <fcntl.h>
+#include <gpiod.h>
+#include <linux/spi/spidev.h>
+#include <sys/ioctl.h>
+#include <unistd.h>
+#endif
 
 namespace {
 
@@ -39,6 +50,7 @@ struct Options {
   bool access_overridden = false;
   bool explicit_start = true;
   bool stdin_raw = false;
+  bool hat_ui = false;
   int buffer_ms = 200;
   int period_ms = 50;
   int ring_ms = 5000;
@@ -77,6 +89,21 @@ std::string BuildAutoOutPath(MicKind mic) {
   return oss.str();
 }
 
+std::string BuildManualTakePath(const std::string& base_path, int take_index) {
+  if (take_index <= 1) {
+    return base_path;
+  }
+  const size_t slash = base_path.find_last_of("/\\");
+  const size_t dot = base_path.find_last_of('.');
+  const bool has_ext = (dot != std::string::npos) &&
+                       (slash == std::string::npos || dot > slash);
+  const std::string stem = has_ext ? base_path.substr(0, dot) : base_path;
+  const std::string ext = has_ext ? base_path.substr(dot) : "";
+  char suffix[32];
+  std::snprintf(suffix, sizeof(suffix), "_take%03d", take_index);
+  return stem + suffix + ext;
+}
+
 void PrintUsage(const char* exe) {
   std::printf(
       "Usage: %s [options]\n"
@@ -93,6 +120,7 @@ void PrintUsage(const char* exe) {
       "  --access <rw|mmap>      ALSA access type (default: rw)\n"
       "  --start <auto|explicit> Stream start mode (default: explicit)\n"
       "  --stdin-raw             Read raw PCM from stdin instead of ALSA\n"
+      "  --hat-ui                Enable Waveshare 1.3inch LCD HAT status UI\n"
       "  --buffer-ms <ms>        ALSA buffer time in ms (default: 200)\n"
       "  --period-ms <ms>        ALSA period time in ms (default: 50)\n"
       "  --ring-ms <ms>          Ring buffer time in ms (default: 5000)\n"
@@ -107,7 +135,12 @@ void PrintUsage(const char* exe) {
       "\n"
       "Auto naming:\n"
       "  If --out is omitted: <mic>_YYYYMMDD_HHMMSS.rf64\n"
-      "  Auto naming requires --mic spcmic|zylia.\n",
+      "  Auto naming requires --mic spcmic|zylia.\n"
+      "\n"
+      "Waveshare HAT controls:\n"
+      "  With --hat-ui the app starts in IDLE and waits for KEY2.\n"
+      "  KEY1 = stop take (back to IDLE) | KEY2 = start recording\n"
+      "  KEY3 = backlight toggle\n",
       exe);
 }
 
@@ -212,6 +245,10 @@ bool ParseArgs(int argc, char** argv, Options* out) {
     }
     if (arg == "--stdin-raw") {
       out->stdin_raw = true;
+      continue;
+    }
+    if (arg == "--hat-ui") {
+      out->hat_ui = true;
       continue;
     }
     if (arg == "--buffer-ms") {
@@ -332,12 +369,570 @@ class RingBuffer {
     return to_read;
   }
 
+  void Clear() {
+    head_ = 0;
+    tail_ = 0;
+    size_ = 0;
+  }
+
  private:
   std::vector<uint8_t> buf_;
   size_t head_ = 0;
   size_t tail_ = 0;
   size_t size_ = 0;
 };
+
+std::string FormatHms(uint64_t total_sec) {
+  const uint64_t hh = total_sec / 3600;
+  const uint64_t mm = (total_sec % 3600) / 60;
+  const uint64_t ss = total_sec % 60;
+  char out[32];
+  std::snprintf(out, sizeof(out), "%02llu:%02llu:%02llu",
+                static_cast<unsigned long long>(hh),
+                static_cast<unsigned long long>(mm),
+                static_cast<unsigned long long>(ss));
+  return std::string(out);
+}
+
+#ifdef __linux__
+
+struct UiSnapshot {
+  bool recording = false;
+  std::string mic;
+  unsigned int rate = 0;
+  int channels = 0;
+  uint64_t xruns = 0;
+  uint64_t dropped_bytes = 0;
+  int ring_fill_pct = 0;
+  uint64_t elapsed_sec = 0;
+};
+
+class WaveshareHatUi {
+ public:
+  const std::string& LastError() const { return last_error_; }
+
+  bool Init() {
+    last_error_.clear();
+
+    chip_ = gpiod_chip_open("/dev/gpiochip0");
+    if (!chip_) {
+      return FailErrno("gpiod_chip_open(/dev/gpiochip0)");
+    }
+
+    if (!RequestLine(&dc_, kPinDc, true, 1, "DC")) {
+      return false;
+    }
+    if (!RequestLine(&rst_, kPinRst, true, 1, "RST")) {
+      return false;
+    }
+    if (!RequestLine(&bl_, kPinBl, true, 1, "BL")) {
+      return false;
+    }
+    if (!RequestLine(&btn_[0], kPinKey1, false, 0, "KEY1")) {
+      return false;
+    }
+    if (!RequestLine(&btn_[1], kPinKey2, false, 0, "KEY2")) {
+      return false;
+    }
+    if (!RequestLine(&btn_[2], kPinKey3, false, 0, "KEY3")) {
+      return false;
+    }
+    if (!RequestLine(&btn_[3], kPinUp, false, 0, "UP")) {
+      return false;
+    }
+    if (!RequestLine(&btn_[4], kPinDown, false, 0, "DOWN")) {
+      return false;
+    }
+    if (!RequestLine(&btn_[5], kPinLeft, false, 0, "LEFT")) {
+      return false;
+    }
+    if (!RequestLine(&btn_[6], kPinRight, false, 0, "RIGHT")) {
+      return false;
+    }
+    if (!RequestLine(&btn_[7], kPinPress, false, 0, "PRESS")) {
+      return false;
+    }
+
+    for (int i = 0; i < 8; ++i) {
+      last_btn_[i] = ReadGpio(btn_[i]);
+      if (last_btn_[i] < 0) {
+        last_btn_[i] = 1;
+      }
+      idle_btn_[i] = last_btn_[i];
+    }
+
+    spi_fd_ = open("/dev/spidev0.0", O_RDWR);
+    if (spi_fd_ < 0) {
+      return FailErrno("open(/dev/spidev0.0)");
+    }
+    uint8_t mode = 0;
+    uint8_t bits = 8;
+    uint32_t speed = 32000000;
+    if (ioctl(spi_fd_, SPI_IOC_WR_MODE, &mode) < 0) {
+      return FailErrno("ioctl(SPI_IOC_WR_MODE)");
+    }
+    if (ioctl(spi_fd_, SPI_IOC_WR_BITS_PER_WORD, &bits) < 0) {
+      return FailErrno("ioctl(SPI_IOC_WR_BITS_PER_WORD)");
+    }
+    if (ioctl(spi_fd_, SPI_IOC_WR_MAX_SPEED_HZ, &speed) < 0) {
+      return FailErrno("ioctl(SPI_IOC_WR_MAX_SPEED_HZ)");
+    }
+
+    if (!WriteGpio(bl_, 1)) return FailErrno("WriteGpio(BL=1)");
+    if (!WriteGpio(rst_, 1)) return FailErrno("WriteGpio(RST=1)");
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    if (!WriteGpio(rst_, 0)) return FailErrno("WriteGpio(RST=0)");
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    if (!WriteGpio(rst_, 1)) return FailErrno("WriteGpio(RST=1)");
+    std::this_thread::sleep_for(std::chrono::milliseconds(120));
+
+    if (!WriteCmd(0x01, nullptr, 0)) return Fail("WriteCmd(SWRESET)");
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    if (!WriteCmd(0x11, nullptr, 0)) return Fail("WriteCmd(SLPOUT)");
+    std::this_thread::sleep_for(std::chrono::milliseconds(120));
+    const uint8_t madctl[] = {0x00};
+    const uint8_t colmod[] = {0x55};  // RGB565
+    if (!WriteCmd(0x36, madctl, sizeof(madctl))) return Fail("WriteCmd(MADCTL)");
+    if (!WriteCmd(0x3A, colmod, sizeof(colmod))) return Fail("WriteCmd(COLMOD)");
+    if (!WriteCmd(0x21, nullptr, 0)) return Fail("WriteCmd(INVON)");
+    if (!WriteCmd(0x29, nullptr, 0)) return Fail("WriteCmd(DISPON)");
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+
+    Clear(kBlack);
+    if (!Flush()) return Fail("Flush(initial)");
+    return true;
+  }
+
+  void Shutdown() {
+    if (spi_fd_ >= 0) close(spi_fd_);
+    spi_fd_ = -1;
+    ReleaseLine(dc_);
+    ReleaseLine(rst_);
+    ReleaseLine(bl_);
+    for (int i = 0; i < 8; ++i) {
+      ReleaseLine(btn_[i]);
+    }
+    if (chip_) {
+      gpiod_chip_close(chip_);
+      chip_ = nullptr;
+    }
+  }
+
+  void PollButtons(bool* start, bool* stop) {
+    if (start) *start = false;
+    if (stop) *stop = false;
+    const int key1 = ReadGpio(btn_[0]);
+    const int key2 = ReadGpio(btn_[1]);
+    const int key3 = ReadGpio(btn_[2]);
+    auto edge = [&](int idx, int value) -> bool {
+      return value >= 0 && last_btn_[idx] == idle_btn_[idx] &&
+             value != idle_btn_[idx];
+    };
+
+    if (stop && edge(0, key1)) {
+      *stop = true;
+    }
+    if (start && edge(1, key2)) {
+      *start = true;
+    }
+    if (edge(2, key3)) {
+      backlight_on_ = !backlight_on_;
+      WriteGpio(bl_, backlight_on_ ? 1 : 0);
+    }
+    if (key1 >= 0) last_btn_[0] = key1;
+    if (key2 >= 0) last_btn_[1] = key2;
+    if (key3 >= 0) last_btn_[2] = key3;
+  }
+
+  bool Render(const UiSnapshot& snap) {
+    Clear(kBlack);
+
+    FillRect(6, 6, 14, 14, snap.recording ? kRed : kDarkGray);
+    DrawText(26, 6, snap.recording ? "REC" : "IDLE", kWhite, 2);
+
+    std::time_t now = std::time(nullptr);
+    std::tm tm_now{};
+    localtime_r(&now, &tm_now);
+    char wall[16];
+    std::snprintf(wall, sizeof(wall), "%02d:%02d:%02d", tm_now.tm_hour,
+                  tm_now.tm_min, tm_now.tm_sec);
+    DrawText(6, 34, "TIME", kCyan, 1);
+    DrawText(66, 30, wall, kWhite, 2);
+
+    DrawText(6, 62, "ELAP", kCyan, 1);
+    DrawText(66, 58, FormatHms(snap.elapsed_sec), kYellow, 2);
+
+    DrawText(6, 90, "MIC", kCyan, 1);
+    DrawText(66, 90, snap.mic, kWhite, 1);
+
+    char rate_ch[32];
+    std::snprintf(rate_ch, sizeof(rate_ch), "%uHz  CH:%d", snap.rate,
+                  snap.channels);
+    DrawText(6, 110, rate_ch, kWhite, 1);
+
+    char xr[32];
+    std::snprintf(xr, sizeof(xr), "XRUN:%llu",
+                  static_cast<unsigned long long>(snap.xruns));
+    DrawText(6, 130, xr, kWhite, 1);
+
+    char dr[32];
+    std::snprintf(dr, sizeof(dr), "DROP:%lluMB",
+                  static_cast<unsigned long long>(snap.dropped_bytes /
+                                                  (1024 * 1024)));
+    DrawText(6, 148, dr, kWhite, 1);
+
+    char rg[32];
+    std::snprintf(rg, sizeof(rg), "RING:%d%%", snap.ring_fill_pct);
+    DrawText(6, 166, rg, kWhite, 1);
+
+    const int bar_w = 220;
+    const int bar_fill = (bar_w * snap.ring_fill_pct) / 100;
+    FillRect(10, 190, bar_w, 14, kDarkGray);
+    if (bar_fill > 0) {
+      const uint16_t c =
+          (snap.ring_fill_pct < 70) ? kGreen : ((snap.ring_fill_pct < 90) ? kYellow : kRed);
+      FillRect(10, 190, bar_fill, 14, c);
+    }
+
+    DrawText(6, 212, "KEY1:STOP KEY2:REC KEY3:BL", kDarkGray, 1);
+    return Flush();
+  }
+
+ private:
+  bool Fail(const char* step) {
+    last_error_ = step;
+    return false;
+  }
+
+  bool FailErrno(const std::string& step) {
+    const int e = errno;
+    std::ostringstream oss;
+    oss << step << " failed: errno=" << e << " (" << std::strerror(e) << ")";
+    last_error_ = oss.str();
+    return false;
+  }
+
+  static constexpr int kWidth = 240;
+  static constexpr int kHeight = 240;
+  static constexpr int kPinRst = 27;
+  static constexpr int kPinDc = 25;
+  static constexpr int kPinBl = 24;
+  static constexpr int kPinKey1 = 21;
+  static constexpr int kPinKey2 = 20;
+  static constexpr int kPinKey3 = 16;
+  static constexpr int kPinUp = 6;
+  static constexpr int kPinDown = 19;
+  static constexpr int kPinLeft = 5;
+  static constexpr int kPinRight = 26;
+  static constexpr int kPinPress = 13;
+
+  static constexpr uint16_t kBlack = 0x0000;
+  static constexpr uint16_t kWhite = 0xFFFF;
+  static constexpr uint16_t kRed = 0xF800;
+  static constexpr uint16_t kGreen = 0x07E0;
+  static constexpr uint16_t kYellow = 0xFFE0;
+  static constexpr uint16_t kCyan = 0x07FF;
+  static constexpr uint16_t kDarkGray = 0x39E7;
+
+  bool WriteCmd(uint8_t cmd, const uint8_t* data, size_t data_len) {
+    if (!WriteGpio(dc_, 0) || !SpiWrite(&cmd, 1)) {
+      return false;
+    }
+    if (data_len == 0) {
+      return true;
+    }
+    return WriteGpio(dc_, 1) && SpiWrite(data, data_len);
+  }
+
+  bool SetWindow() {
+    const uint8_t x[] = {0x00, 0x00, 0x00, 0xEF};
+    const uint8_t y[] = {0x00, 0x00, 0x00, 0xEF};
+    return WriteCmd(0x2A, x, sizeof(x)) && WriteCmd(0x2B, y, sizeof(y)) &&
+           WriteCmd(0x2C, nullptr, 0);
+  }
+
+  bool Flush() {
+    if (!SetWindow()) {
+      return false;
+    }
+    if (!WriteGpio(dc_, 1)) {
+      return false;
+    }
+    return SpiWrite(frame_.data(), frame_.size());
+  }
+
+  void Clear(uint16_t color) {
+    const uint8_t hi = static_cast<uint8_t>(color >> 8);
+    const uint8_t lo = static_cast<uint8_t>(color & 0xFF);
+    for (size_t i = 0; i < frame_.size(); i += 2) {
+      frame_[i] = hi;
+      frame_[i + 1] = lo;
+    }
+  }
+
+  void SetPixel(int x, int y, uint16_t color) {
+    if (x < 0 || y < 0 || x >= kWidth || y >= kHeight) return;
+    // Rotate full UI 90 degrees clockwise in software.
+    const int rx = (kWidth - 1) - y;
+    const int ry = x;
+    const size_t idx = static_cast<size_t>(ry * kWidth + rx) * 2;
+    frame_[idx] = static_cast<uint8_t>(color >> 8);
+    frame_[idx + 1] = static_cast<uint8_t>(color & 0xFF);
+  }
+
+  void FillRect(int x, int y, int w, int h, uint16_t color) {
+    for (int yy = y; yy < y + h; ++yy) {
+      for (int xx = x; xx < x + w; ++xx) {
+        SetPixel(xx, yy, color);
+      }
+    }
+  }
+
+  static const uint8_t* Glyph(char c) {
+    static const uint8_t sp[] = {0x00, 0x00, 0x00, 0x00, 0x00};
+    static const uint8_t dash[] = {0x08, 0x08, 0x08, 0x08, 0x08};
+    static const uint8_t colon[] = {0x00, 0x36, 0x36, 0x00, 0x00};
+    static const uint8_t p0[] = {0x3E, 0x51, 0x49, 0x45, 0x3E};
+    static const uint8_t p1[] = {0x00, 0x42, 0x7F, 0x40, 0x00};
+    static const uint8_t p2[] = {0x42, 0x61, 0x51, 0x49, 0x46};
+    static const uint8_t p3[] = {0x21, 0x41, 0x45, 0x4B, 0x31};
+    static const uint8_t p4[] = {0x18, 0x14, 0x12, 0x7F, 0x10};
+    static const uint8_t p5[] = {0x27, 0x45, 0x45, 0x45, 0x39};
+    static const uint8_t p6[] = {0x3C, 0x4A, 0x49, 0x49, 0x30};
+    static const uint8_t p7[] = {0x01, 0x71, 0x09, 0x05, 0x03};
+    static const uint8_t p8[] = {0x36, 0x49, 0x49, 0x49, 0x36};
+    static const uint8_t p9[] = {0x06, 0x49, 0x49, 0x29, 0x1E};
+    static const uint8_t a[] = {0x7E, 0x11, 0x11, 0x11, 0x7E};
+    static const uint8_t b[] = {0x7F, 0x49, 0x49, 0x49, 0x36};
+    static const uint8_t c2[] = {0x3E, 0x41, 0x41, 0x41, 0x22};
+    static const uint8_t d[] = {0x7F, 0x41, 0x41, 0x22, 0x1C};
+    static const uint8_t e[] = {0x7F, 0x49, 0x49, 0x49, 0x41};
+    static const uint8_t g[] = {0x3E, 0x41, 0x49, 0x49, 0x7A};
+    static const uint8_t h[] = {0x7F, 0x08, 0x08, 0x08, 0x7F};
+    static const uint8_t i[] = {0x00, 0x41, 0x7F, 0x41, 0x00};
+    static const uint8_t k[] = {0x7F, 0x08, 0x14, 0x22, 0x41};
+    static const uint8_t l[] = {0x7F, 0x40, 0x40, 0x40, 0x40};
+    static const uint8_t m[] = {0x7F, 0x02, 0x0C, 0x02, 0x7F};
+    static const uint8_t n[] = {0x7F, 0x04, 0x08, 0x10, 0x7F};
+    static const uint8_t o[] = {0x3E, 0x41, 0x41, 0x41, 0x3E};
+    static const uint8_t p[] = {0x7F, 0x09, 0x09, 0x09, 0x06};
+    static const uint8_t r[] = {0x7F, 0x09, 0x19, 0x29, 0x46};
+    static const uint8_t s[] = {0x46, 0x49, 0x49, 0x49, 0x31};
+    static const uint8_t t[] = {0x01, 0x01, 0x7F, 0x01, 0x01};
+    static const uint8_t u[] = {0x3F, 0x40, 0x40, 0x40, 0x3F};
+    static const uint8_t x[] = {0x63, 0x14, 0x08, 0x14, 0x63};
+    static const uint8_t y[] = {0x03, 0x04, 0x78, 0x04, 0x03};
+    static const uint8_t z[] = {0x61, 0x51, 0x49, 0x45, 0x43};
+
+    switch (c) {
+      case '0': return p0;
+      case '1': return p1;
+      case '2': return p2;
+      case '3': return p3;
+      case '4': return p4;
+      case '5': return p5;
+      case '6': return p6;
+      case '7': return p7;
+      case '8': return p8;
+      case '9': return p9;
+      case 'A': return a;
+      case 'B': return b;
+      case 'C': return c2;
+      case 'D': return d;
+      case 'E': return e;
+      case 'G': return g;
+      case 'H': return h;
+      case 'I': return i;
+      case 'K': return k;
+      case 'L': return l;
+      case 'M': return m;
+      case 'N': return n;
+      case 'O': return o;
+      case 'P': return p;
+      case 'R': return r;
+      case 'S': return s;
+      case 'T': return t;
+      case 'U': return u;
+      case 'X': return x;
+      case 'Y': return y;
+      case 'Z': return z;
+      case ':': return colon;
+      case '-': return dash;
+      case ' ': return sp;
+      default: return sp;
+    }
+  }
+
+  void DrawText(int x, int y, const std::string& text, uint16_t color,
+                int scale) {
+    int cx = x;
+    for (char raw : text) {
+      char c = raw;
+      if (c >= 'a' && c <= 'z') {
+        c = static_cast<char>(c - 'a' + 'A');
+      }
+      const uint8_t* g = Glyph(c);
+      for (int col = 0; col < 5; ++col) {
+        for (int row = 0; row < 7; ++row) {
+          if ((g[col] >> row) & 0x01) {
+            FillRect(cx + col * scale, y + row * scale, scale, scale, color);
+          }
+        }
+      }
+      cx += 6 * scale;
+    }
+  }
+
+  struct GpioLine {
+    unsigned int offset = 0;
+    gpiod_line_request* request = nullptr;
+  };
+
+  bool RequestLine(GpioLine* line, unsigned int offset, bool output,
+                   int initial_value, const char* label) {
+    gpiod_line_settings* settings = gpiod_line_settings_new();
+    if (!settings) {
+      return FailErrno((std::string("gpiod_line_settings_new(") + label + ")")
+                           .c_str());
+    }
+    gpiod_line_settings_set_direction(
+        settings, output ? GPIOD_LINE_DIRECTION_OUTPUT
+                         : GPIOD_LINE_DIRECTION_INPUT);
+    if (output) {
+      gpiod_line_settings_set_output_value(
+          settings, initial_value ? GPIOD_LINE_VALUE_ACTIVE
+                                  : GPIOD_LINE_VALUE_INACTIVE);
+    } else {
+      // Waveshare key/joystick lines are switch-to-GND inputs; request pull-up.
+      (void)gpiod_line_settings_set_bias(settings, GPIOD_LINE_BIAS_PULL_UP);
+    }
+
+    gpiod_line_config* line_cfg = gpiod_line_config_new();
+    if (!line_cfg) {
+      gpiod_line_settings_free(settings);
+      return FailErrno((std::string("gpiod_line_config_new(") + label + ")")
+                           .c_str());
+    }
+    const unsigned int offsets[1] = {offset};
+    if (gpiod_line_config_add_line_settings(line_cfg, offsets, 1, settings) <
+        0) {
+      gpiod_line_config_free(line_cfg);
+      gpiod_line_settings_free(settings);
+      return FailErrno((std::string("gpiod_line_config_add_line_settings(") +
+                        label + ")")
+                           .c_str());
+    }
+
+    gpiod_request_config* req_cfg = gpiod_request_config_new();
+    if (!req_cfg) {
+      gpiod_line_config_free(line_cfg);
+      gpiod_line_settings_free(settings);
+      return FailErrno((std::string("gpiod_request_config_new(") + label + ")")
+                           .c_str());
+    }
+    gpiod_request_config_set_consumer(req_cfg, "rpi_multirec");
+
+    gpiod_line_request* req = gpiod_chip_request_lines(chip_, req_cfg, line_cfg);
+    gpiod_request_config_free(req_cfg);
+    gpiod_line_config_free(line_cfg);
+    gpiod_line_settings_free(settings);
+    if (!req) {
+      return FailErrno((std::string("gpiod_chip_request_lines(") + label + ")")
+                           .c_str());
+    }
+
+    line->offset = offset;
+    line->request = req;
+    return true;
+  }
+
+  static void ReleaseLine(GpioLine& line) {
+    if (line.request) {
+      gpiod_line_request_release(line.request);
+      line.request = nullptr;
+    }
+  }
+
+  static bool WriteGpio(const GpioLine& line, int value) {
+    if (!line.request) return false;
+    const enum gpiod_line_value v =
+        value ? GPIOD_LINE_VALUE_ACTIVE : GPIOD_LINE_VALUE_INACTIVE;
+    return gpiod_line_request_set_value(
+               line.request, line.offset,
+               static_cast<enum gpiod_line_value>(v)) == 0;
+  }
+
+  static int ReadGpio(const GpioLine& line) {
+    if (!line.request) return -1;
+    const int v = gpiod_line_request_get_value(line.request, line.offset);
+    if (v < 0) {
+      return -1;
+    }
+    return (v == GPIOD_LINE_VALUE_ACTIVE) ? 1 : 0;
+  }
+
+  bool SpiWrite(const uint8_t* data, size_t len) {
+    if (spi_fd_ < 0) return false;
+    // spidev has a per-transfer size limit (often 4096 bytes), so send in chunks.
+    constexpr size_t kSpiChunkBytes = 4096;
+    size_t offset = 0;
+    while (offset < len) {
+      const size_t chunk = std::min(kSpiChunkBytes, len - offset);
+      spi_ioc_transfer tr{};
+      tr.tx_buf = reinterpret_cast<unsigned long>(data + offset);
+      tr.len = static_cast<uint32_t>(chunk);
+      tr.speed_hz = 32000000;
+      tr.bits_per_word = 8;
+      if (ioctl(spi_fd_, SPI_IOC_MESSAGE(1), &tr) < 0) {
+        return false;
+      }
+      offset += chunk;
+    }
+    return true;
+  }
+
+  int spi_fd_ = -1;
+  gpiod_chip* chip_ = nullptr;
+  GpioLine dc_;
+  GpioLine rst_;
+  GpioLine bl_;
+  GpioLine btn_[8];
+  int last_btn_[8] = {1, 1, 1, 1, 1, 1, 1, 1};
+  int idle_btn_[8] = {1, 1, 1, 1, 1, 1, 1, 1};
+  bool backlight_on_ = true;
+  std::string last_error_;
+  std::vector<uint8_t> frame_ =
+      std::vector<uint8_t>(static_cast<size_t>(kWidth * kHeight * 2), 0);
+};
+
+#else
+
+struct UiSnapshot {
+  bool recording = false;
+  std::string mic;
+  unsigned int rate = 0;
+  int channels = 0;
+  uint64_t xruns = 0;
+  uint64_t dropped_bytes = 0;
+  int ring_fill_pct = 0;
+  uint64_t elapsed_sec = 0;
+};
+
+class WaveshareHatUi {
+ public:
+  bool Init() { return false; }
+  const std::string& LastError() const { return last_error_; }
+  void Shutdown() {}
+  void PollButtons(bool* start, bool* stop) {
+    if (start) *start = false;
+    if (stop) *stop = false;
+  }
+  bool Render(const UiSnapshot&) { return false; }
+ private:
+  std::string last_error_ = "Not supported on non-Linux build";
+};
+
+#endif
 
 void ListAlsaDevices() {
   void** hints = nullptr;
@@ -388,6 +983,11 @@ int main(int argc, char** argv) {
     return 0;
   }
 
+  if (opt.hat_ui && opt.stdin_raw) {
+    std::fprintf(stderr, "--hat-ui does not support --stdin-raw\n");
+    return 1;
+  }
+
   if (!opt.out_overridden) {
     if (opt.mic == MicKind::kUnspecified) {
       std::fprintf(stderr,
@@ -395,7 +995,9 @@ int main(int argc, char** argv) {
                    "(or provide --out)\n");
       return 1;
     }
-    opt.out_path = BuildAutoOutPath(opt.mic);
+    if (!opt.hat_ui) {
+      opt.out_path = BuildAutoOutPath(opt.mic);
+    }
   }
 
   std::signal(SIGINT, HandleSignal);
@@ -494,29 +1096,22 @@ int main(int argc, char** argv) {
 
   if (period_size == 0) {
     std::fprintf(stderr, "Invalid period size\n");
-    snd_pcm_close(pcm);
+    if (pcm) {
+      snd_pcm_close(pcm);
+    }
     return 1;
   }
 
   std::vector<uint8_t> buffer;
   buffer.resize(static_cast<size_t>(period_size) * bytes_per_frame);
 
-  SF_INFO info{};
-  info.samplerate = static_cast<int>(actual_rate);
-  info.channels = opt.channels;
-  info.format = SF_FORMAT_RF64 |
-                ((opt.format == SND_PCM_FORMAT_S16_LE) ? SF_FORMAT_PCM_16
-                                                       : SF_FORMAT_PCM_24);
-
-  SNDFILE* snd = sf_open(opt.out_path.c_str(), SFM_WRITE, &info);
-  if (!snd) {
-    std::fprintf(stderr, "sf_open failed: %s\n", sf_strerror(nullptr));
-    snd_pcm_close(pcm);
-    return 1;
-  }
-
-  // Allow auto downgrade to WAV if file is < 4GB on close.
-  sf_command(snd, SFC_RF64_AUTO_DOWNGRADE, nullptr, SF_TRUE);
+  SF_INFO info_template{};
+  info_template.samplerate = static_cast<int>(actual_rate);
+  info_template.channels = opt.channels;
+  info_template.format = SF_FORMAT_RF64 |
+                         ((opt.format == SND_PCM_FORMAT_S16_LE)
+                              ? SF_FORMAT_PCM_16
+                              : SF_FORMAT_PCM_24);
 
   size_t ring_bytes = static_cast<size_t>(actual_rate) * bytes_per_frame *
                       static_cast<size_t>(opt.ring_ms) / 1000;
@@ -531,42 +1126,45 @@ int main(int argc, char** argv) {
   std::mutex ring_mutex;
   std::condition_variable ring_cv;
 
+  SNDFILE* snd = nullptr;
+  std::thread writer;
+  std::atomic<bool> writer_running{false};
   std::atomic<bool> writer_error{false};
+
   std::atomic<uint64_t> dropped_bytes{0};
   std::atomic<uint64_t> xrun_count{0};
+  std::atomic<bool> recording_active{false};
+  std::atomic<bool> start_requested{false};
+  std::atomic<bool> stop_requested{false};
+  std::atomic<int64_t> record_start_ms{0};
 
-  std::thread writer([&] {
-    std::vector<uint8_t> out;
-    out.resize(period_bytes);
-    while (g_running.load() || ring.size() > 0) {
-      size_t bytes = 0;
-      {
-        std::unique_lock<std::mutex> lock(ring_mutex);
-        ring_cv.wait_for(lock, std::chrono::milliseconds(200), [&] {
-          return ring.size() > 0 || !g_running.load();
-        });
-        bytes = ring.Read(out.data(), out.size());
-      }
-      if (bytes == 0) {
-        continue;
-      }
-      const sf_count_t wrote = sf_write_raw(snd, out.data(), bytes);
-      if (wrote != static_cast<sf_count_t>(bytes)) {
-        std::fprintf(stderr, "sf_write_raw short write: %ld/%ld bytes\n",
-                     static_cast<long>(wrote), static_cast<long>(bytes));
-        writer_error.store(true);
-        g_running.store(false);
-        break;
-      }
-    }
-  });
+  uint64_t take_count = 0;
+  std::string current_out_path;
 
   const char* fmt_label =
       (opt.format == SND_PCM_FORMAT_S16_LE) ? "S16_LE" : "S24_3LE";
   const char* access_label =
       (opt.access == SND_PCM_ACCESS_MMAP_INTERLEAVED) ? "MMAP" : "RW";
   const char* start_label = opt.explicit_start ? "explicit" : "auto";
-  if (opt.stdin_raw) {
+  const std::string out_preview =
+      opt.out_overridden
+          ? opt.out_path
+          : (std::string(MicKindToString(opt.mic)) + "_YYYYMMDD_HHMMSS.rf64");
+
+  if (opt.hat_ui) {
+    std::fprintf(stdout,
+                 "Idle mode enabled on HAT UI.\n"
+                 "ALSA device: %s | period: %lu frames | buffer: %lu frames\n"
+                 "Format: %d ch @ %u Hz (%s) | access: %s | start: %s\n"
+                 "Output file: %s\n"
+                 "Ring buffer: %lu ms (~%lu MB)\n"
+                 "Press KEY2 to start, KEY1 to stop, Ctrl+C to exit.\n",
+                 opt.device.c_str(), static_cast<unsigned long>(period_size),
+                 static_cast<unsigned long>(buffer_size), opt.channels,
+                 actual_rate, fmt_label, access_label, start_label,
+                 out_preview.c_str(), static_cast<unsigned long>(opt.ring_ms),
+                 static_cast<unsigned long>(ring_bytes / (1024 * 1024)));
+  } else if (opt.stdin_raw) {
     std::fprintf(stdout,
                  "Recording %d ch @ %u Hz (%s) to %s\n"
                  "Input: stdin raw PCM | period: %lu frames\n"
@@ -596,45 +1194,260 @@ int main(int argc, char** argv) {
     snd_pcm_sw_params_current(pcm, swparams);
     snd_pcm_sw_params_set_start_threshold(pcm, swparams, 1);
     snd_pcm_sw_params_set_avail_min(pcm, swparams, period_size);
-    int err = snd_pcm_sw_params(pcm, swparams);
+    const int err = snd_pcm_sw_params(pcm, swparams);
     snd_pcm_sw_params_free(swparams);
     if (err < 0) {
       std::fprintf(stderr, "snd_pcm_sw_params failed: %s\n",
                    snd_strerror(err));
       snd_pcm_close(pcm);
-      sf_close(snd);
       return 1;
-    }
-
-    err = snd_pcm_prepare(pcm);
-    if (err < 0) {
-      std::fprintf(stderr, "snd_pcm_prepare failed: %s\n", snd_strerror(err));
-      snd_pcm_close(pcm);
-      sf_close(snd);
-      return 1;
-    }
-    if (opt.explicit_start) {
-      err = snd_pcm_start(pcm);
-      if (err < 0) {
-        std::fprintf(stderr, "snd_pcm_start failed: %s\n", snd_strerror(err));
-        snd_pcm_close(pcm);
-        sf_close(snd);
-        return 1;
-      }
     }
   }
 
   auto next_status = std::chrono::steady_clock::now();
   const auto status_interval = std::chrono::milliseconds(opt.status_ms);
+  auto now_ms = []() -> int64_t {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+  };
+
+  auto start_writer = [&]() {
+    writer_running.store(true);
+    writer = std::thread([&] {
+      std::vector<uint8_t> out;
+      out.resize(period_bytes);
+      for (;;) {
+        size_t bytes = 0;
+        {
+          std::unique_lock<std::mutex> lock(ring_mutex);
+          ring_cv.wait_for(lock, std::chrono::milliseconds(200), [&] {
+            return ring.size() > 0 || !writer_running.load();
+          });
+          if (!writer_running.load() && ring.size() == 0) {
+            break;
+          }
+          bytes = ring.Read(out.data(), out.size());
+        }
+        if (bytes == 0) {
+          continue;
+        }
+        const sf_count_t wrote = sf_write_raw(snd, out.data(), bytes);
+        if (wrote != static_cast<sf_count_t>(bytes)) {
+          std::fprintf(stderr, "sf_write_raw short write: %ld/%ld bytes\n",
+                       static_cast<long>(wrote), static_cast<long>(bytes));
+          writer_error.store(true);
+          writer_running.store(false);
+          g_running.store(false);
+          ring_cv.notify_all();
+          break;
+        }
+      }
+    });
+  };
+
+  auto stop_writer = [&]() {
+    writer_running.store(false);
+    ring_cv.notify_all();
+    if (writer.joinable()) {
+      writer.join();
+    }
+  };
+
+  auto start_take = [&]() -> bool {
+    if (recording_active.load()) {
+      return true;
+    }
+
+    const int take_index = static_cast<int>(take_count + 1);
+    if (!opt.hat_ui) {
+      current_out_path = opt.out_path;
+    } else {
+      current_out_path =
+          opt.out_overridden ? BuildManualTakePath(opt.out_path, take_index)
+                             : BuildAutoOutPath(opt.mic);
+    }
+
+    {
+      std::lock_guard<std::mutex> lock(ring_mutex);
+      ring.Clear();
+    }
+    dropped_bytes.store(0);
+    xrun_count.store(0);
+
+    SF_INFO info = info_template;
+    snd = sf_open(current_out_path.c_str(), SFM_WRITE, &info);
+    if (!snd) {
+      std::fprintf(stderr, "sf_open failed for %s: %s\n",
+                   current_out_path.c_str(), sf_strerror(nullptr));
+      return false;
+    }
+    sf_command(snd, SFC_RF64_AUTO_DOWNGRADE, nullptr, SF_TRUE);
+
+    if (!opt.stdin_raw) {
+      int err = snd_pcm_prepare(pcm);
+      if (err < 0) {
+        std::fprintf(stderr, "snd_pcm_prepare failed: %s\n", snd_strerror(err));
+        sf_close(snd);
+        snd = nullptr;
+        return false;
+      }
+      if (opt.explicit_start) {
+        err = snd_pcm_start(pcm);
+        if (err < 0) {
+          std::fprintf(stderr, "snd_pcm_start failed: %s\n", snd_strerror(err));
+          sf_close(snd);
+          snd = nullptr;
+          return false;
+        }
+      }
+    }
+
+    start_writer();
+    recording_active.store(true);
+    record_start_ms.store(now_ms());
+    next_status = std::chrono::steady_clock::now();
+    ++take_count;
+    std::fprintf(stdout, "Recording started: %s\n", current_out_path.c_str());
+    return true;
+  };
+
+  auto stop_take = [&]() {
+    if (!recording_active.load()) {
+      return;
+    }
+
+    if (!opt.stdin_raw && pcm) {
+      snd_pcm_drop(pcm);
+    }
+
+    recording_active.store(false);
+    record_start_ms.store(0);
+    stop_writer();
+
+    if (snd) {
+      sf_write_sync(snd);
+      sf_close(snd);
+      snd = nullptr;
+    }
+    {
+      std::lock_guard<std::mutex> lock(ring_mutex);
+      ring.Clear();
+    }
+    std::fprintf(stdout, "Take stopped: %s | XRUNs: %llu | Dropped: %llu bytes\n",
+                 current_out_path.c_str(),
+                 static_cast<unsigned long long>(xrun_count.load()),
+                 static_cast<unsigned long long>(dropped_bytes.load()));
+  };
+
+  const std::string ui_mic_name =
+      (opt.mic == MicKind::kUnspecified) ? "custom" : MicKindToString(opt.mic);
+  auto make_ui_snapshot = [&]() -> UiSnapshot {
+    UiSnapshot snap;
+    snap.recording = recording_active.load();
+    snap.mic = ui_mic_name;
+    snap.rate = actual_rate;
+    snap.channels = opt.channels;
+    snap.xruns = xrun_count.load();
+    snap.dropped_bytes = dropped_bytes.load();
+    {
+      std::lock_guard<std::mutex> lock(ring_mutex);
+      if (ring.capacity() > 0) {
+        const size_t pct = (ring.size() * 100) / ring.capacity();
+        snap.ring_fill_pct = static_cast<int>(std::min<size_t>(pct, 100));
+      }
+    }
+    if (snap.recording) {
+      const int64_t start_ms = record_start_ms.load();
+      if (start_ms > 0) {
+        const int64_t delta_ms = std::max<int64_t>(0, now_ms() - start_ms);
+        snap.elapsed_sec = static_cast<uint64_t>(delta_ms / 1000);
+      }
+    }
+    return snap;
+  };
+
+  std::unique_ptr<WaveshareHatUi> hat_ui;
+  std::thread ui_thread;
+  if (opt.hat_ui) {
+#ifdef __linux__
+    hat_ui = std::make_unique<WaveshareHatUi>();
+    if (!hat_ui->Init()) {
+      std::fprintf(
+          stderr,
+          "Failed to initialize Waveshare HAT UI: %s\n"
+          "Check SPI (/dev/spidev0.0), GPIO permissions, and wiring.\n"
+          "Try running with sudo.\n",
+          hat_ui->LastError().c_str());
+      if (pcm) {
+        snd_pcm_close(pcm);
+      }
+      return 1;
+    }
+    ui_thread = std::thread([&] {
+      while (g_running.load()) {
+        bool start_evt = false;
+        bool stop_evt = false;
+        hat_ui->PollButtons(&start_evt, &stop_evt);
+        if (start_evt) {
+          start_requested.store(true);
+        }
+        if (stop_evt) {
+          stop_requested.store(true);
+        }
+        hat_ui->Render(make_ui_snapshot());
+        std::this_thread::sleep_for(std::chrono::milliseconds(150));
+      }
+      UiSnapshot snap = make_ui_snapshot();
+      snap.recording = false;
+      hat_ui->Render(snap);
+    });
+#else
+    std::fprintf(stderr, "--hat-ui is only supported on Linux.\n");
+    if (pcm) {
+      snd_pcm_close(pcm);
+    }
+    return 1;
+#endif
+  }
+
+  if (!opt.hat_ui) {
+    if (!start_take()) {
+      g_running.store(false);
+    }
+  }
 
   while (g_running.load()) {
+    if (opt.hat_ui && !recording_active.load()) {
+      if (start_requested.exchange(false)) {
+        if (!start_take()) {
+          std::fprintf(stderr, "Failed to start take\n");
+        }
+      }
+      stop_requested.store(false);
+      std::this_thread::sleep_for(std::chrono::milliseconds(20));
+      continue;
+    }
+
+    if (opt.hat_ui && recording_active.load() &&
+        stop_requested.exchange(false)) {
+      stop_take();
+      continue;
+    }
+
+    if (!recording_active.load()) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+      continue;
+    }
+
     if (opt.stdin_raw) {
       const size_t want = period_bytes;
-      size_t got = std::fread(buffer.data(), 1, want, stdin);
+      const size_t got = std::fread(buffer.data(), 1, want, stdin);
       if (got == 0) {
         if (std::ferror(stdin)) {
           std::perror("stdin read");
         }
+        g_running.store(false);
         break;
       }
       const size_t frames = got / bytes_per_frame;
@@ -687,6 +1500,7 @@ int main(int argc, char** argv) {
         if (frames < 0) {
           std::fprintf(stderr, "snd_pcm_readi failed: %s\n",
                        snd_strerror(static_cast<int>(frames)));
+          g_running.store(false);
           break;
         }
         continue;
@@ -735,18 +1549,29 @@ int main(int argc, char** argv) {
     }
   }
 
+  if (recording_active.load()) {
+    stop_take();
+  }
+  stop_writer();
+
   g_running.store(false);
   ring_cv.notify_all();
-  if (writer.joinable()) {
-    writer.join();
+  if (ui_thread.joinable()) {
+    ui_thread.join();
   }
-
-  sf_write_sync(snd);
-  sf_close(snd);
+  if (hat_ui) {
+    hat_ui->Shutdown();
+  }
+  if (snd) {
+    sf_close(snd);
+  }
   if (pcm) {
     snd_pcm_close(pcm);
   }
-  std::fprintf(stdout, "Stopped. XRUNs: %llu | Dropped: %llu bytes\n",
+  std::fprintf(stdout,
+               "Stopped. Takes: %llu | Last XRUNs: %llu | Last Dropped: %llu "
+               "bytes\n",
+               static_cast<unsigned long long>(take_count),
                static_cast<unsigned long long>(xrun_count.load()),
                static_cast<unsigned long long>(dropped_bytes.load()));
   if (writer_error.load()) {
