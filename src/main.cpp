@@ -138,11 +138,13 @@ void PrintUsage(const char* exe) {
       "  Auto naming requires --mic spcmic|zylia.\n"
       "\n"
       "Waveshare HAT controls:\n"
-      "  With --hat-ui the app starts in IDLE and waits for KEY2.\n"
-      "  KEY1 = stop take (back to IDLE) | KEY2 = start recording\n"
+      "  With --hat-ui the app starts in IDLE.\n"
+      "  KEY2 = MON from IDLE, then KEY2 again = REC\n"
+      "  KEY1 = stop (MON->IDLE or REC->stop/finalize)\n"
       "  KEY3 = backlight toggle\n"
       "  Joystick LEFT/RIGHT (IDLE only) = select spcmic/zylia preset\n"
-      "  Joystick UP/DOWN (IDLE only) = select 96kHz/48kHz\n",
+      "  Joystick UP/DOWN (IDLE only) = select 96kHz/48kHz\n"
+      "  Joystick UP/DOWN (Zylia in MON/REC) = Master Gain +/-1 dB (hold to repeat)\n",
       exe);
 }
 
@@ -439,15 +441,155 @@ int ComputePeakPercent(const uint8_t* data, size_t bytes, snd_pcm_format_t fmt) 
   return 0;
 }
 
+class ZyliaGainControl {
+ public:
+  ~ZyliaGainControl() { Close(); }
+
+  bool Open(const std::string& card = "hw:CARD=ZM13E") {
+    Close();
+
+    if (snd_mixer_open(&mixer_, 0) < 0) {
+      Close();
+      return false;
+    }
+    if (snd_mixer_attach(mixer_, card.c_str()) < 0) {
+      Close();
+      return false;
+    }
+    if (snd_mixer_selem_register(mixer_, nullptr, nullptr) < 0) {
+      Close();
+      return false;
+    }
+    if (snd_mixer_load(mixer_) < 0) {
+      Close();
+      return false;
+    }
+
+    snd_mixer_selem_id_t* sid = nullptr;
+    snd_mixer_selem_id_malloc(&sid);
+    if (!sid) {
+      Close();
+      return false;
+    }
+    snd_mixer_selem_id_set_index(sid, 0);
+    snd_mixer_selem_id_set_name(sid, "Master Gain");
+    elem_ = snd_mixer_find_selem(mixer_, sid);
+    snd_mixer_selem_id_free(sid);
+    if (!elem_) {
+      Close();
+      return false;
+    }
+
+    if (snd_mixer_selem_has_capture_volume(elem_)) {
+      use_capture_ = true;
+      if (snd_mixer_selem_get_capture_dB_range(elem_, &min_db_, &max_db_) < 0) {
+        Close();
+        return false;
+      }
+    } else if (snd_mixer_selem_has_playback_volume(elem_)) {
+      use_capture_ = false;
+      if (snd_mixer_selem_get_playback_dB_range(elem_, &min_db_, &max_db_) < 0) {
+        Close();
+        return false;
+      }
+    } else {
+      Close();
+      return false;
+    }
+    if (min_db_ > max_db_) {
+      std::swap(min_db_, max_db_);
+    }
+    return true;
+  }
+
+  void Close() {
+    elem_ = nullptr;
+    if (mixer_) {
+      snd_mixer_close(mixer_);
+      mixer_ = nullptr;
+    }
+    use_capture_ = false;
+    min_db_ = 0;
+    max_db_ = 0;
+  }
+
+  bool IsOpen() const { return elem_ != nullptr; }
+
+  bool ReadDb(int* db) const {
+    if (!db) {
+      return false;
+    }
+    long centi_db = 0;
+    if (!GetDbCenti(&centi_db)) {
+      return false;
+    }
+    *db = static_cast<int>((centi_db >= 0) ? ((centi_db + 50) / 100)
+                                           : ((centi_db - 50) / 100));
+    return true;
+  }
+
+  bool StepDb(int delta_db) {
+    if (delta_db == 0 || !IsOpen()) {
+      return delta_db == 0;
+    }
+    long centi_db = 0;
+    if (!GetDbCenti(&centi_db)) {
+      return false;
+    }
+    long target = centi_db + static_cast<long>(delta_db) * 100;
+    target = std::max(min_db_, std::min(max_db_, target));
+    if (target == centi_db) {
+      return true;
+    }
+    return SetDbCenti(target);
+  }
+
+ private:
+  bool GetDbCenti(long* centi_db) const {
+    if (!centi_db || !elem_) {
+      return false;
+    }
+    if (use_capture_) {
+      const snd_mixer_selem_channel_id_t ch =
+          snd_mixer_selem_is_capture_mono(elem_) ? SND_MIXER_SCHN_MONO
+                                                 : SND_MIXER_SCHN_FRONT_LEFT;
+      return snd_mixer_selem_get_capture_dB(elem_, ch, centi_db) == 0;
+    }
+    const snd_mixer_selem_channel_id_t ch =
+        snd_mixer_selem_is_playback_mono(elem_) ? SND_MIXER_SCHN_MONO
+                                                : SND_MIXER_SCHN_FRONT_LEFT;
+    return snd_mixer_selem_get_playback_dB(elem_, ch, centi_db) == 0;
+  }
+
+  bool SetDbCenti(long centi_db) {
+    if (!elem_) {
+      return false;
+    }
+    if (use_capture_) {
+      return snd_mixer_selem_set_capture_dB_all(elem_, centi_db, 0) == 0;
+    }
+    return snd_mixer_selem_set_playback_dB_all(elem_, centi_db, 0) == 0;
+  }
+
+  bool use_capture_ = false;
+  snd_mixer_t* mixer_ = nullptr;
+  snd_mixer_elem_t* elem_ = nullptr;
+  long min_db_ = 0;
+  long max_db_ = 0;
+};
+
 #ifdef __linux__
 
 struct UiSnapshot {
   bool recording = false;
+  bool monitoring = false;
   std::string mic;
   bool mic_connected = true;
   bool finalize_pending = false;
   unsigned int rate = 0;
   int channels = 0;
+  bool zylia_gain_valid = false;
+  int zylia_gain_db = 0;
   int peak_pct = 0;
   uint64_t xruns = 0;
   uint64_t dropped_bytes = 0;
@@ -567,7 +709,7 @@ class WaveshareHatUi {
   }
 
   void PollButtons(bool* start, bool* stop, bool* mic_left, bool* mic_right,
-                   bool* rate_up, bool* rate_down) {
+                   bool* rate_up, bool* rate_down, bool repeat_ud = false) {
     if (start) *start = false;
     if (stop) *stop = false;
     if (mic_left) *mic_left = false;
@@ -584,6 +726,29 @@ class WaveshareHatUi {
     auto edge = [&](int idx, int value) -> bool {
       return value >= 0 && last_btn_[idx] == idle_btn_[idx] &&
              value != idle_btn_[idx];
+    };
+    const auto now = std::chrono::steady_clock::now();
+    auto pressed = [&](int idx, int value) -> bool {
+      return value >= 0 && value != idle_btn_[idx];
+    };
+    auto was_pressed = [&](int idx) -> bool {
+      return last_btn_[idx] != idle_btn_[idx];
+    };
+    auto hold_repeat = [&](int idx, int value, bool* out) {
+      if (!out) {
+        return;
+      }
+      if (pressed(idx, value)) {
+        if (!was_pressed(idx)) {
+          *out = true;
+          next_repeat_[idx] = now + std::chrono::milliseconds(350);
+        } else if (repeat_ud && now >= next_repeat_[idx]) {
+          *out = true;
+          next_repeat_[idx] = now + std::chrono::milliseconds(120);
+        }
+      } else {
+        next_repeat_[idx] = std::chrono::steady_clock::time_point{};
+      }
     };
 
     if (stop && edge(0, key1)) {
@@ -602,12 +767,8 @@ class WaveshareHatUi {
     if (mic_right && edge(6, joy_right)) {
       *mic_right = true;
     }
-    if (rate_up && edge(3, joy_up)) {
-      *rate_up = true;
-    }
-    if (rate_down && edge(4, joy_down)) {
-      *rate_down = true;
-    }
+    hold_repeat(3, joy_up, rate_up);
+    hold_repeat(4, joy_down, rate_down);
     if (key1 >= 0) last_btn_[0] = key1;
     if (key2 >= 0) last_btn_[1] = key2;
     if (key3 >= 0) last_btn_[2] = key3;
@@ -620,8 +781,17 @@ class WaveshareHatUi {
   bool Render(const UiSnapshot& snap) {
     Clear(kBlack);
     const int margin = 12;
-    FillRect(126, 6, 16, 16, snap.recording ? kRed : kDarkGray);
-    DrawText(146, 6, snap.recording ? "REC" : "IDLE", kWhite, 3);
+    const char* state = "IDLE";
+    uint16_t state_dot = kDarkGray;
+    if (snap.recording) {
+      state = "REC";
+      state_dot = kRed;
+    } else if (snap.monitoring) {
+      state = "MON";
+      state_dot = kGreen;
+    }
+    FillRect(126, 6, 16, 16, state_dot);
+    DrawText(146, 6, state, kWhite, 3);
 
     DrawText(margin, 22, "ELAP", kCyan, 2);
     DrawText(margin, 43, FormatHms(snap.elapsed_sec),
@@ -652,8 +822,13 @@ class WaveshareHatUi {
     DrawText(margin + 66, 122, snap.mic, snap.mic_connected ? kWhite : kRed, 2);
 
     char rate_ch[32];
-    std::snprintf(rate_ch, sizeof(rate_ch), "%ukHz  CH:%d", snap.rate / 1000,
-                  snap.channels);
+    if (snap.zylia_gain_valid) {
+      std::snprintf(rate_ch, sizeof(rate_ch), "%ukHz  CH:%d  G:%+ddB",
+                    snap.rate / 1000, snap.channels, snap.zylia_gain_db);
+    } else {
+      std::snprintf(rate_ch, sizeof(rate_ch), "%ukHz  CH:%d", snap.rate / 1000,
+                    snap.channels);
+    }
     DrawText(margin, 146, rate_ch, kOrange, 2);
 
     char xr[32];
@@ -974,6 +1149,7 @@ class WaveshareHatUi {
   GpioLine btn_[8];
   int last_btn_[8] = {1, 1, 1, 1, 1, 1, 1, 1};
   int idle_btn_[8] = {1, 1, 1, 1, 1, 1, 1, 1};
+  std::chrono::steady_clock::time_point next_repeat_[8];
   bool backlight_on_ = true;
   std::string last_error_;
   std::vector<uint8_t> frame_ =
@@ -984,11 +1160,14 @@ class WaveshareHatUi {
 
 struct UiSnapshot {
   bool recording = false;
+  bool monitoring = false;
   std::string mic;
   bool mic_connected = true;
   bool finalize_pending = false;
   unsigned int rate = 0;
   int channels = 0;
+  bool zylia_gain_valid = false;
+  int zylia_gain_db = 0;
   int peak_pct = 0;
   uint64_t xruns = 0;
   uint64_t dropped_bytes = 0;
@@ -1002,7 +1181,8 @@ class WaveshareHatUi {
   const std::string& LastError() const { return last_error_; }
   void Shutdown() {}
   void PollButtons(bool* start, bool* stop, bool* mic_left, bool* mic_right,
-                   bool* rate_up, bool* rate_down) {
+                   bool* rate_up, bool* rate_down, bool repeat_ud = false) {
+    (void)repeat_ud;
     if (start) *start = false;
     if (stop) *stop = false;
     if (mic_left) *mic_left = false;
@@ -1288,6 +1468,7 @@ int main(int argc, char** argv) {
 
   std::atomic<uint64_t> dropped_bytes{0};
   std::atomic<uint64_t> xrun_count{0};
+  std::atomic<bool> monitoring_active{false};
   std::atomic<bool> recording_active{false};
   std::atomic<bool> finalize_in_progress{false};
   std::atomic<bool> start_requested{false};
@@ -1299,6 +1480,10 @@ int main(int argc, char** argv) {
   std::atomic<int64_t> record_start_ms{0};
   std::atomic<uint64_t> finalize_elapsed_sec{0};
   std::atomic<int> peak_percent{0};
+  std::atomic<bool> joy_ud_repeat{false};
+  std::atomic<bool> zylia_gain_valid{false};
+  std::atomic<int> zylia_gain_db{0};
+  ZyliaGainControl zylia_gain_ctl;
 
   uint64_t take_count = 0;
   std::string current_out_path;
@@ -1309,20 +1494,37 @@ int main(int argc, char** argv) {
   auto AccessLabel = [&]() -> const char* {
     return (current_access == SND_PCM_ACCESS_MMAP_INTERLEAVED) ? "MMAP" : "RW";
   };
+  auto RefreshZyliaGain = [&]() {
+    zylia_gain_valid.store(false);
+    zylia_gain_db.store(0);
+    if (selected_mic != MicKind::kZylia || !mic_available.load()) {
+      zylia_gain_ctl.Close();
+      return;
+    }
+    if (!zylia_gain_ctl.IsOpen() && !zylia_gain_ctl.Open("hw:CARD=ZM13E")) {
+      return;
+    }
+    int db = 0;
+    if (zylia_gain_ctl.ReadDb(&db)) {
+      zylia_gain_db.store(db);
+      zylia_gain_valid.store(true);
+    }
+  };
   const std::string out_preview =
       opt.out_overridden
           ? opt.out_path
           : (std::string(MicKindToString(selected_mic)) +
              "_YYYYMMDD_HHMMSS.rf64");
+  RefreshZyliaGain();
 
   if (opt.hat_ui) {
     std::fprintf(stdout,
                  "Idle mode enabled on HAT UI.\n"
                  "ALSA device: %s | period: %lu frames | buffer: %lu frames\n"
                  "Format: %d ch @ %u Hz (%s) | access: %s | start: %s\n"
-                 "Output file: %s\n"
-                 "Ring buffer: %lu ms (~%lu MB)\n"
-                 "Press KEY2 to start, KEY1 to stop, Ctrl+C to exit.\n",
+                  "Output file: %s\n"
+                  "Ring buffer: %lu ms (~%lu MB)\n"
+                  "Press KEY2 for MON, KEY2 again for REC, KEY1 to stop, Ctrl+C to exit.\n",
                  current_device.c_str(), static_cast<unsigned long>(period_size),
                  static_cast<unsigned long>(buffer_size), current_channels,
                  actual_rate, fmt_label, AccessLabel(), start_label,
@@ -1402,6 +1604,44 @@ int main(int argc, char** argv) {
     }
   };
 
+  auto start_monitoring = [&]() -> bool {
+    if (monitoring_active.load() || recording_active.load()) {
+      return true;
+    }
+    if (!opt.stdin_raw) {
+      int err = snd_pcm_prepare(pcm);
+      if (err < 0) {
+        std::fprintf(stderr, "snd_pcm_prepare failed: %s\n", snd_strerror(err));
+        return false;
+      }
+      if (opt.explicit_start) {
+        err = snd_pcm_start(pcm);
+        if (err < 0) {
+          std::fprintf(stderr, "snd_pcm_start failed: %s\n", snd_strerror(err));
+          return false;
+        }
+      }
+    }
+    monitoring_active.store(true);
+    peak_percent.store(0);
+    record_start_ms.store(0);
+    next_status = std::chrono::steady_clock::now();
+    std::fprintf(stdout, "Monitoring started\n");
+    return true;
+  };
+
+  auto stop_monitoring = [&]() {
+    if (!monitoring_active.load()) {
+      return;
+    }
+    if (!opt.stdin_raw && pcm) {
+      snd_pcm_drop(pcm);
+    }
+    monitoring_active.store(false);
+    peak_percent.store(0);
+    std::fprintf(stdout, "Monitoring stopped\n");
+  };
+
   auto start_take = [&]() -> bool {
     if (recording_active.load()) {
       return true;
@@ -1437,7 +1677,7 @@ int main(int argc, char** argv) {
     }
     sf_command(snd, SFC_RF64_AUTO_DOWNGRADE, nullptr, SF_TRUE);
 
-    if (!opt.stdin_raw) {
+    if (!opt.stdin_raw && !monitoring_active.load()) {
       int err = snd_pcm_prepare(pcm);
       if (err < 0) {
         std::fprintf(stderr, "snd_pcm_prepare failed: %s\n", snd_strerror(err));
@@ -1458,6 +1698,7 @@ int main(int argc, char** argv) {
 
     start_writer();
     recording_active.store(true);
+    monitoring_active.store(false);
     finalize_in_progress.store(false);
     finalize_elapsed_sec.store(0);
     peak_percent.store(0);
@@ -1486,6 +1727,7 @@ int main(int argc, char** argv) {
     }
 
     recording_active.store(false);
+    monitoring_active.store(false);
     stop_writer();
 
     if (snd) {
@@ -1510,11 +1752,14 @@ int main(int argc, char** argv) {
   auto make_ui_snapshot = [&]() -> UiSnapshot {
     UiSnapshot snap;
     snap.recording = recording_active.load();
+    snap.monitoring = monitoring_active.load();
     snap.finalize_pending = finalize_in_progress.load();
     snap.mic = MicKindToString(selected_mic);
     snap.mic_connected = mic_available.load();
     snap.rate = actual_rate;
     snap.channels = current_channels;
+    snap.zylia_gain_valid = zylia_gain_valid.load();
+    snap.zylia_gain_db = zylia_gain_db.load();
     snap.peak_pct = peak_percent.load();
     snap.xruns = xrun_count.load();
     snap.dropped_bytes = dropped_bytes.load();
@@ -1531,6 +1776,8 @@ int main(int argc, char** argv) {
         const int64_t delta_ms = std::max<int64_t>(0, now_ms() - start_ms);
         snap.elapsed_sec = static_cast<uint64_t>(delta_ms / 1000);
       }
+    } else if (snap.monitoring) {
+      snap.elapsed_sec = 0;
     } else if (snap.finalize_pending) {
       snap.elapsed_sec = finalize_elapsed_sec.load();
       snap.peak_pct = 0;
@@ -1566,24 +1813,24 @@ int main(int argc, char** argv) {
         bool rate_up_evt = false;
         bool rate_down_evt = false;
         hat_ui->PollButtons(&start_evt, &stop_evt, &mic_left_evt,
-                            &mic_right_evt, &rate_up_evt, &rate_down_evt);
-        if (start_evt && !recording_active.load() &&
-            !finalize_in_progress.load()) {
+                            &mic_right_evt, &rate_up_evt, &rate_down_evt,
+                            joy_ud_repeat.load());
+        if (start_evt && !finalize_in_progress.load()) {
           start_requested.store(true);
         }
         if (stop_evt) {
           stop_requested.store(true);
         }
-        if (mic_left_evt && !recording_active.load()) {
+        if (mic_left_evt && !recording_active.load() && !monitoring_active.load()) {
           mic_left_requested.store(true);
         }
-        if (mic_right_evt && !recording_active.load()) {
+        if (mic_right_evt && !recording_active.load() && !monitoring_active.load()) {
           mic_right_requested.store(true);
         }
-        if (rate_up_evt && !recording_active.load()) {
+        if (rate_up_evt) {
           rate_up_requested.store(true);
         }
-        if (rate_down_evt && !recording_active.load()) {
+        if (rate_down_evt) {
           rate_down_requested.store(true);
         }
         hat_ui->Render(make_ui_snapshot());
@@ -1591,6 +1838,7 @@ int main(int argc, char** argv) {
       }
       UiSnapshot snap = make_ui_snapshot();
       snap.recording = false;
+      snap.monitoring = false;
       hat_ui->Render(snap);
     });
 #else
@@ -1609,7 +1857,11 @@ int main(int argc, char** argv) {
   }
 
   while (g_running.load()) {
-    if (opt.hat_ui && !recording_active.load()) {
+    const bool is_rec = recording_active.load();
+    const bool is_mon = monitoring_active.load();
+    joy_ud_repeat.store(selected_mic == MicKind::kZylia && (is_mon || is_rec));
+
+    if (opt.hat_ui && !is_rec && !is_mon) {
       bool mic_changed = false;
       bool rate_changed = false;
       if (mic_left_requested.exchange(false)) {
@@ -1637,6 +1889,7 @@ int main(int argc, char** argv) {
           g_running.store(false);
           break;
         }
+        RefreshZyliaGain();
         {
           std::lock_guard<std::mutex> lock(ring_mutex);
           ring = RingBuffer(ring_bytes);
@@ -1660,8 +1913,8 @@ int main(int argc, char** argv) {
           std::this_thread::sleep_for(std::chrono::milliseconds(20));
           continue;
         }
-        if (!start_take()) {
-          std::fprintf(stderr, "Failed to start take\n");
+        if (!start_monitoring()) {
+          std::fprintf(stderr, "Failed to start monitoring\n");
           mic_available.store(false);
         }
       }
@@ -1670,13 +1923,49 @@ int main(int argc, char** argv) {
       continue;
     }
 
-    if (opt.hat_ui && recording_active.load() &&
-        stop_requested.exchange(false)) {
-      stop_take();
-      continue;
+    if (opt.hat_ui) {
+      if (is_mon && stop_requested.exchange(false)) {
+        stop_monitoring();
+        continue;
+      }
+      if (is_rec && stop_requested.exchange(false)) {
+        stop_take();
+        continue;
+      }
+      if (start_requested.exchange(false)) {
+        if (is_mon) {
+          if (!start_take()) {
+            std::fprintf(stderr, "Failed to start take from MON\n");
+          }
+        } else if (!is_rec && !finalize_in_progress.load()) {
+          if (!mic_available.load()) {
+            std::fprintf(stdout, "Cannot monitor: selected mic is not connected.\n");
+          } else if (!start_monitoring()) {
+            std::fprintf(stderr, "Failed to start monitoring\n");
+            mic_available.store(false);
+          }
+        }
+      }
+
+      if ((is_mon || is_rec) && selected_mic == MicKind::kZylia &&
+          mic_available.load()) {
+        int gain_delta = 0;
+        if (rate_up_requested.exchange(false)) {
+          gain_delta += 1;
+        }
+        if (rate_down_requested.exchange(false)) {
+          gain_delta -= 1;
+        }
+        if (gain_delta != 0 && zylia_gain_ctl.StepDb(gain_delta)) {
+          RefreshZyliaGain();
+        }
+      } else {
+        rate_up_requested.store(false);
+        rate_down_requested.store(false);
+      }
     }
 
-    if (!recording_active.load()) {
+    if (!recording_active.load() && !monitoring_active.load()) {
       std::this_thread::sleep_for(std::chrono::milliseconds(5));
       continue;
     }
@@ -1699,19 +1988,20 @@ int main(int argc, char** argv) {
       peak_percent.store(
           std::max(0, std::min(100, ComputePeakPercent(buffer.data(), bytes,
                                                        opt.format))));
-
-      bool pushed = false;
-      {
-        std::lock_guard<std::mutex> lock(ring_mutex);
-        if (ring.free() >= bytes) {
-          ring.Write(buffer.data(), bytes);
-          pushed = true;
+      if (recording_active.load()) {
+        bool pushed = false;
+        {
+          std::lock_guard<std::mutex> lock(ring_mutex);
+          if (ring.free() >= bytes) {
+            ring.Write(buffer.data(), bytes);
+            pushed = true;
+          }
         }
-      }
-      if (!pushed) {
-        dropped_bytes.fetch_add(bytes);
-      } else {
-        ring_cv.notify_one();
+        if (!pushed) {
+          dropped_bytes.fetch_add(bytes);
+        } else {
+          ring_cv.notify_one();
+        }
       }
     } else {
       snd_pcm_sframes_t frames =
@@ -1757,18 +2047,20 @@ int main(int argc, char** argv) {
       peak_percent.store(
           std::max(0, std::min(100, ComputePeakPercent(buffer.data(), bytes,
                                                        opt.format))));
-      bool pushed = false;
-      {
-        std::lock_guard<std::mutex> lock(ring_mutex);
-        if (ring.free() >= bytes) {
-          ring.Write(buffer.data(), bytes);
-          pushed = true;
+      if (recording_active.load()) {
+        bool pushed = false;
+        {
+          std::lock_guard<std::mutex> lock(ring_mutex);
+          if (ring.free() >= bytes) {
+            ring.Write(buffer.data(), bytes);
+            pushed = true;
+          }
         }
-      }
-      if (!pushed) {
-        dropped_bytes.fetch_add(bytes);
-      } else {
-        ring_cv.notify_one();
+        if (!pushed) {
+          dropped_bytes.fetch_add(bytes);
+        } else {
+          ring_cv.notify_one();
+        }
       }
     }
 
@@ -1799,6 +2091,9 @@ int main(int argc, char** argv) {
   if (recording_active.load()) {
     stop_take();
   }
+  if (monitoring_active.load()) {
+    stop_monitoring();
+  }
   stop_writer();
 
   g_running.store(false);
@@ -1815,6 +2110,7 @@ int main(int argc, char** argv) {
   if (pcm) {
     snd_pcm_close(pcm);
   }
+  zylia_gain_ctl.Close();
   std::fprintf(stdout,
                "Stopped. Takes: %llu | Last XRUNs: %llu | Last Dropped: %llu "
                "bytes\n",
