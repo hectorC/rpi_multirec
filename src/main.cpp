@@ -396,6 +396,49 @@ std::string FormatHms(uint64_t total_sec) {
   return std::string(out);
 }
 
+int ComputePeakPercent(const uint8_t* data, size_t bytes, snd_pcm_format_t fmt) {
+  if (!data || bytes == 0) {
+    return 0;
+  }
+
+  if (fmt == SND_PCM_FORMAT_S16_LE) {
+    const size_t samples = bytes / 2;
+    int32_t max_abs = 0;
+    for (size_t i = 0; i < samples; ++i) {
+      const size_t o = i * 2;
+      const int16_t s = static_cast<int16_t>(
+          static_cast<uint16_t>(data[o]) |
+          (static_cast<uint16_t>(data[o + 1]) << 8));
+      const int32_t a = std::abs(static_cast<int32_t>(s));
+      if (a > max_abs) {
+        max_abs = a;
+      }
+    }
+    return static_cast<int>((max_abs * 100LL) / 32767LL);
+  }
+
+  if (fmt == SND_PCM_FORMAT_S24_3LE) {
+    const size_t samples = bytes / 3;
+    int32_t max_abs = 0;
+    for (size_t i = 0; i < samples; ++i) {
+      const size_t o = i * 3;
+      int32_t v = static_cast<int32_t>(data[o]) |
+                  (static_cast<int32_t>(data[o + 1]) << 8) |
+                  (static_cast<int32_t>(data[o + 2]) << 16);
+      if (v & 0x00800000) {
+        v |= ~0x00FFFFFF;
+      }
+      const int32_t a = std::abs(v);
+      if (a > max_abs) {
+        max_abs = a;
+      }
+    }
+    return static_cast<int>((max_abs * 100LL) / 8388607LL);
+  }
+
+  return 0;
+}
+
 #ifdef __linux__
 
 struct UiSnapshot {
@@ -405,6 +448,7 @@ struct UiSnapshot {
   bool finalize_pending = false;
   unsigned int rate = 0;
   int channels = 0;
+  int peak_pct = 0;
   uint64_t xruns = 0;
   uint64_t dropped_bytes = 0;
   int ring_fill_pct = 0;
@@ -582,6 +626,27 @@ class WaveshareHatUi {
     DrawText(margin, 22, "ELAP", kCyan, 2);
     DrawText(margin, 43, FormatHms(snap.elapsed_sec),
              snap.finalize_pending ? kRed : kYellow, 4);
+
+    DrawText(margin, 86, "PEAK", kCyan, 2);
+    const int meter_x = margin + 54;
+    const int meter_y = 90;
+    const int meter_w = 164;
+    const int meter_h = 10;
+    FillRect(meter_x - 1, meter_y - 1, meter_w + 2, meter_h + 2, kDarkGray);
+    const int fill_w =
+        (std::max(0, std::min(100, snap.peak_pct)) * meter_w) / 100;
+    uint16_t meter_color = kGreen;
+    if (snap.peak_pct >= 90) {
+      meter_color = kRed;
+    } else if (snap.peak_pct >= 70) {
+      meter_color = kOrange;
+    }
+    if (fill_w > 0) {
+      FillRect(meter_x, meter_y, fill_w, meter_h, meter_color);
+    }
+    if (fill_w < meter_w) {
+      FillRect(meter_x + fill_w, meter_y, meter_w - fill_w, meter_h, kBlack);
+    }
 
     DrawText(margin, 122, "MIC", kCyan, 2);
     DrawText(margin + 66, 122, snap.mic, snap.mic_connected ? kWhite : kRed, 2);
@@ -924,6 +989,7 @@ struct UiSnapshot {
   bool finalize_pending = false;
   unsigned int rate = 0;
   int channels = 0;
+  int peak_pct = 0;
   uint64_t xruns = 0;
   uint64_t dropped_bytes = 0;
   int ring_fill_pct = 0;
@@ -1232,6 +1298,7 @@ int main(int argc, char** argv) {
   std::atomic<bool> rate_down_requested{false};
   std::atomic<int64_t> record_start_ms{0};
   std::atomic<uint64_t> finalize_elapsed_sec{0};
+  std::atomic<int> peak_percent{0};
 
   uint64_t take_count = 0;
   std::string current_out_path;
@@ -1393,6 +1460,7 @@ int main(int argc, char** argv) {
     recording_active.store(true);
     finalize_in_progress.store(false);
     finalize_elapsed_sec.store(0);
+    peak_percent.store(0);
     record_start_ms.store(now_ms());
     next_status = std::chrono::steady_clock::now();
     ++take_count;
@@ -1434,6 +1502,7 @@ int main(int argc, char** argv) {
                  static_cast<unsigned long long>(xrun_count.load()),
                  static_cast<unsigned long long>(dropped_bytes.load()));
     record_start_ms.store(0);
+    peak_percent.store(0);
     finalize_elapsed_sec.store(0);
     finalize_in_progress.store(false);
   };
@@ -1446,6 +1515,7 @@ int main(int argc, char** argv) {
     snap.mic_connected = mic_available.load();
     snap.rate = actual_rate;
     snap.channels = current_channels;
+    snap.peak_pct = peak_percent.load();
     snap.xruns = xrun_count.load();
     snap.dropped_bytes = dropped_bytes.load();
     {
@@ -1463,6 +1533,9 @@ int main(int argc, char** argv) {
       }
     } else if (snap.finalize_pending) {
       snap.elapsed_sec = finalize_elapsed_sec.load();
+      snap.peak_pct = 0;
+    } else {
+      snap.peak_pct = 0;
     }
     return snap;
   };
@@ -1623,6 +1696,9 @@ int main(int argc, char** argv) {
       if (bytes == 0) {
         continue;
       }
+      peak_percent.store(
+          std::max(0, std::min(100, ComputePeakPercent(buffer.data(), bytes,
+                                                       opt.format))));
 
       bool pushed = false;
       {
@@ -1678,6 +1754,9 @@ int main(int argc, char** argv) {
       }
 
       const size_t bytes = static_cast<size_t>(frames) * bytes_per_frame;
+      peak_percent.store(
+          std::max(0, std::min(100, ComputePeakPercent(buffer.data(), bytes,
+                                                       opt.format))));
       bool pushed = false;
       {
         std::lock_guard<std::mutex> lock(ring_mutex);
