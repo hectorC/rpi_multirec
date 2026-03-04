@@ -143,8 +143,9 @@ void PrintUsage(const char* exe) {
       "  KEY1 = stop (MON->IDLE or REC->stop/finalize)\n"
       "  KEY3 = backlight toggle\n"
       "  Joystick LEFT/RIGHT (IDLE only) = select spcmic/zylia preset\n"
-      "  Joystick UP/DOWN (IDLE only) = select 96kHz/48kHz\n"
-      "  Joystick UP/DOWN (Zylia in MON/REC) = Master Gain +/-1 dB (hold to repeat)\n",
+      "  SPCMIC: Joystick UP/DOWN (IDLE only) = select 96kHz/48kHz\n"
+      "  ZYLIA: Joystick UP/DOWN (IDLE/MON/REC) = Master Gain +/-1 dB (hold to repeat)\n"
+      "  Zylia sample rate is fixed to 48kHz.\n",
       exe);
 }
 
@@ -304,6 +305,12 @@ bool ParseArgs(int argc, char** argv, Options* out) {
     }
     if (!out->access_overridden) {
       out->access = SND_PCM_ACCESS_MMAP_INTERLEAVED;
+    }
+    if (out->rate != 48000) {
+      std::fprintf(stderr,
+                   "Info: forcing rate to 48000 for zylia preset (requested %d)\n",
+                   out->rate);
+      out->rate = 48000;
     }
   }
 
@@ -1272,6 +1279,7 @@ int main(int argc, char** argv) {
   unsigned int actual_rate = static_cast<unsigned int>(opt.rate);
   MicKind selected_mic =
       (opt.mic == MicKind::kUnspecified) ? MicKind::kSpcmic : opt.mic;
+  int spcmic_rate_hz = (opt.rate == 96000) ? 96000 : 48000;
   std::string current_device = opt.device;
   int current_channels = opt.channels;
   snd_pcm_access_t current_access = opt.access;
@@ -1290,6 +1298,10 @@ int main(int argc, char** argv) {
   if (opt.hat_ui &&
       (selected_mic == MicKind::kSpcmic || selected_mic == MicKind::kZylia)) {
     ApplyMicPreset(selected_mic);
+    if (selected_mic == MicKind::kZylia) {
+      opt.rate = 48000;
+      actual_rate = 48000;
+    }
   }
 
   const int bytes_per_sample =
@@ -1859,26 +1871,55 @@ int main(int argc, char** argv) {
   while (g_running.load()) {
     const bool is_rec = recording_active.load();
     const bool is_mon = monitoring_active.load();
-    joy_ud_repeat.store(selected_mic == MicKind::kZylia && (is_mon || is_rec));
+    joy_ud_repeat.store(selected_mic == MicKind::kZylia);
 
     if (opt.hat_ui && !is_rec && !is_mon) {
       bool mic_changed = false;
       bool rate_changed = false;
-      if (mic_left_requested.exchange(false)) {
+      int gain_delta = 0;
+
+      if (mic_left_requested.exchange(false) &&
+          selected_mic != MicKind::kSpcmic) {
         ApplyMicPreset(MicKind::kSpcmic);
         mic_changed = true;
+        if (opt.rate != spcmic_rate_hz) {
+          opt.rate = spcmic_rate_hz;
+          rate_changed = true;
+        }
       }
-      if (mic_right_requested.exchange(false)) {
+      if (mic_right_requested.exchange(false) &&
+          selected_mic != MicKind::kZylia) {
+        if (selected_mic == MicKind::kSpcmic) {
+          spcmic_rate_hz = opt.rate;
+        }
         ApplyMicPreset(MicKind::kZylia);
         mic_changed = true;
+        if (opt.rate != 48000) {
+          opt.rate = 48000;
+          rate_changed = true;
+        }
       }
-      if (rate_up_requested.exchange(false) && opt.rate != 96000) {
-        opt.rate = 96000;
-        rate_changed = true;
-      }
-      if (rate_down_requested.exchange(false) && opt.rate != 48000) {
-        opt.rate = 48000;
-        rate_changed = true;
+
+      const bool up_evt = rate_up_requested.exchange(false);
+      const bool down_evt = rate_down_requested.exchange(false);
+      if (selected_mic == MicKind::kSpcmic) {
+        if (up_evt && opt.rate != 96000) {
+          opt.rate = 96000;
+          spcmic_rate_hz = opt.rate;
+          rate_changed = true;
+        }
+        if (down_evt && opt.rate != 48000) {
+          opt.rate = 48000;
+          spcmic_rate_hz = opt.rate;
+          rate_changed = true;
+        }
+      } else if (selected_mic == MicKind::kZylia) {
+        if (up_evt) {
+          gain_delta += 1;
+        }
+        if (down_evt) {
+          gain_delta -= 1;
+        }
       }
 
       if (mic_changed || rate_changed) {
@@ -1904,6 +1945,10 @@ int main(int argc, char** argv) {
                        "disabled)\n",
                        MicKindToString(selected_mic), opt.rate);
         }
+      }
+      if (selected_mic == MicKind::kZylia && gain_delta != 0 &&
+          mic_available.load() && zylia_gain_ctl.StepDb(gain_delta)) {
+        RefreshZyliaGain();
       }
 
       if (start_requested.exchange(false)) {
@@ -1947,21 +1992,20 @@ int main(int argc, char** argv) {
         }
       }
 
+      const bool up_evt = rate_up_requested.exchange(false);
+      const bool down_evt = rate_down_requested.exchange(false);
       if ((is_mon || is_rec) && selected_mic == MicKind::kZylia &&
           mic_available.load()) {
         int gain_delta = 0;
-        if (rate_up_requested.exchange(false)) {
+        if (up_evt) {
           gain_delta += 1;
         }
-        if (rate_down_requested.exchange(false)) {
+        if (down_evt) {
           gain_delta -= 1;
         }
         if (gain_delta != 0 && zylia_gain_ctl.StepDb(gain_delta)) {
           RefreshZyliaGain();
         }
-      } else {
-        rate_up_requested.store(false);
-        rate_down_requested.store(false);
       }
     }
 
