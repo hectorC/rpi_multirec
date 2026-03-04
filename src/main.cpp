@@ -23,6 +23,7 @@
 #ifdef __linux__
 #include <fcntl.h>
 #include <gpiod.h>
+#include <linux/i2c-dev.h>
 #include <linux/spi/spidev.h>
 #include <sys/ioctl.h>
 #include <unistd.h>
@@ -585,6 +586,111 @@ class ZyliaGainControl {
   long max_db_ = 0;
 };
 
+struct UpsBatteryStatus {
+  bool valid = false;
+  int percent = 0;
+  double bus_voltage_v = 0.0;
+};
+
+class UpsHatBMonitor {
+ public:
+  ~UpsHatBMonitor() { Close(); }
+
+  bool Open(int i2c_bus = 1, uint8_t addr = 0x42) {
+#ifdef __linux__
+    Close();
+    char dev[32];
+    std::snprintf(dev, sizeof(dev), "/dev/i2c-%d", i2c_bus);
+    fd_ = open(dev, O_RDWR);
+    if (fd_ < 0) {
+      return false;
+    }
+    if (ioctl(fd_, I2C_SLAVE, addr) < 0) {
+      Close();
+      return false;
+    }
+    if (!WriteReg16(0x05, 4096)) {
+      Close();
+      return false;
+    }
+    return true;
+#else
+    (void)i2c_bus;
+    (void)addr;
+    return false;
+#endif
+  }
+
+  void Close() {
+#ifdef __linux__
+    if (fd_ >= 0) {
+      close(fd_);
+      fd_ = -1;
+    }
+#endif
+  }
+
+  bool IsOpen() const {
+#ifdef __linux__
+    return fd_ >= 0;
+#else
+    return false;
+#endif
+  }
+
+  bool Read(UpsBatteryStatus* out) {
+    if (!out || !IsOpen()) {
+      return false;
+    }
+#ifdef __linux__
+    uint16_t raw = 0;
+    if (!WriteReg16(0x05, 4096) || !ReadReg16(0x02, &raw)) {
+      return false;
+    }
+    const double bus_v = static_cast<double>((raw >> 3) & 0x1FFF) * 0.004;
+    const double p = ((bus_v - 6.0) / 2.4) * 100.0;
+    out->bus_voltage_v = bus_v;
+    out->percent =
+        static_cast<int>(std::max(0.0, std::min(100.0, p)));
+    out->valid = true;
+    return true;
+#else
+    return false;
+#endif
+  }
+
+ private:
+#ifdef __linux__
+  bool WriteReg16(uint8_t reg, uint16_t value) {
+    if (fd_ < 0) {
+      return false;
+    }
+    uint8_t data[3];
+    data[0] = reg;
+    data[1] = static_cast<uint8_t>((value >> 8) & 0xFF);
+    data[2] = static_cast<uint8_t>(value & 0xFF);
+    return write(fd_, data, 3) == 3;
+  }
+
+  bool ReadReg16(uint8_t reg, uint16_t* out) {
+    if (fd_ < 0 || !out) {
+      return false;
+    }
+    if (write(fd_, &reg, 1) != 1) {
+      return false;
+    }
+    uint8_t data[2];
+    if (read(fd_, data, 2) != 2) {
+      return false;
+    }
+    *out = static_cast<uint16_t>((data[0] << 8) | data[1]);
+    return true;
+  }
+
+  int fd_ = -1;
+#endif
+};
+
 #ifdef __linux__
 
 struct UiSnapshot {
@@ -592,6 +698,8 @@ struct UiSnapshot {
   bool monitoring = false;
   std::string mic;
   bool mic_connected = true;
+  bool battery_valid = false;
+  int battery_pct = 0;
   bool finalize_pending = false;
   unsigned int rate = 0;
   int channels = 0;
@@ -848,6 +956,22 @@ class WaveshareHatUi {
                   static_cast<unsigned long long>(snap.dropped_bytes /
                                                   (1024 * 1024)));
     DrawText(margin, 198, dr, snap.dropped_bytes > 0 ? kRed : kWhite, 2);
+
+    char bat[16];
+    if (snap.battery_valid) {
+      std::snprintf(bat, sizeof(bat), "BAT %3d%%", snap.battery_pct);
+    } else {
+      std::snprintf(bat, sizeof(bat), "BAT --%%");
+    }
+    const int bat_scale = 2;
+    const int bat_w = static_cast<int>(std::strlen(bat)) * 6 * bat_scale;
+    const int bat_x = kWidth - margin - bat_w;
+    const int bat_y = kHeight - (7 * bat_scale) - 6;
+    uint16_t bat_color = kDarkGray;
+    if (snap.battery_valid) {
+      bat_color = (snap.battery_pct <= 20) ? kRed : kWhite;
+    }
+    DrawText(bat_x, bat_y, bat, bat_color, bat_scale);
 
     // DrawText(margin, 184, "KEY1:STOP KEY2:REC KEY3:BL", kDarkGray, 1);
     // DrawText(margin, 202, "L SPC R ZYL  U96 D48", kDarkGray, 1);
@@ -1170,6 +1294,8 @@ struct UiSnapshot {
   bool monitoring = false;
   std::string mic;
   bool mic_connected = true;
+  bool battery_valid = false;
+  int battery_pct = 0;
   bool finalize_pending = false;
   unsigned int rate = 0;
   int channels = 0;
@@ -1495,7 +1621,10 @@ int main(int argc, char** argv) {
   std::atomic<bool> joy_ud_repeat{false};
   std::atomic<bool> zylia_gain_valid{false};
   std::atomic<int> zylia_gain_db{0};
+  std::atomic<bool> battery_valid{false};
+  std::atomic<int> battery_pct{0};
   ZyliaGainControl zylia_gain_ctl;
+  UpsHatBMonitor ups_hat_monitor;
 
   uint64_t take_count = 0;
   std::string current_out_path;
@@ -1522,12 +1651,30 @@ int main(int argc, char** argv) {
       zylia_gain_valid.store(true);
     }
   };
+  auto RefreshBatteryStatus = [&]() {
+    UpsBatteryStatus st;
+    if (ups_hat_monitor.Read(&st)) {
+      battery_valid.store(st.valid);
+      battery_pct.store(st.percent);
+    } else {
+      battery_valid.store(false);
+    }
+  };
   const std::string out_preview =
       opt.out_overridden
           ? opt.out_path
           : (std::string(MicKindToString(selected_mic)) +
              "_YYYYMMDD_HHMMSS.rf64");
   RefreshZyliaGain();
+  if (opt.hat_ui) {
+    if (ups_hat_monitor.Open()) {
+      RefreshBatteryStatus();
+    } else {
+      std::fprintf(stdout,
+                   "UPS HAT battery monitor unavailable "
+                   "(check I2C and address 0x42).\n");
+    }
+  }
 
   if (opt.hat_ui) {
     std::fprintf(stdout,
@@ -1568,6 +1715,8 @@ int main(int argc, char** argv) {
 
   auto next_status = std::chrono::steady_clock::now();
   const auto status_interval = std::chrono::milliseconds(opt.status_ms);
+  auto next_battery_poll = std::chrono::steady_clock::now();
+  const auto battery_interval = std::chrono::seconds(1);
   auto now_ms = []() -> int64_t {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
                std::chrono::steady_clock::now().time_since_epoch())
@@ -1768,6 +1917,8 @@ int main(int argc, char** argv) {
     snap.finalize_pending = finalize_in_progress.load();
     snap.mic = MicKindToString(selected_mic);
     snap.mic_connected = mic_available.load();
+    snap.battery_valid = battery_valid.load();
+    snap.battery_pct = battery_pct.load();
     snap.rate = actual_rate;
     snap.channels = current_channels;
     snap.zylia_gain_valid = zylia_gain_valid.load();
@@ -1869,6 +2020,14 @@ int main(int argc, char** argv) {
   }
 
   while (g_running.load()) {
+    if (opt.hat_ui && ups_hat_monitor.IsOpen()) {
+      const auto now = std::chrono::steady_clock::now();
+      if (now >= next_battery_poll) {
+        RefreshBatteryStatus();
+        next_battery_poll = now + battery_interval;
+      }
+    }
+
     const bool is_rec = recording_active.load();
     const bool is_mon = monitoring_active.load();
     joy_ud_repeat.store(selected_mic == MicKind::kZylia);
@@ -2155,6 +2314,7 @@ int main(int argc, char** argv) {
     snd_pcm_close(pcm);
   }
   zylia_gain_ctl.Close();
+  ups_hat_monitor.Close();
   std::fprintf(stdout,
                "Stopped. Takes: %llu | Last XRUNs: %llu | Last Dropped: %llu "
                "bytes\n",
