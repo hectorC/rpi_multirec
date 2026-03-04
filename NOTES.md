@@ -134,3 +134,42 @@ sudo modprobe zm_1_driver
 Verify it loaded:
 lsmod | grep zm_1_driver
 dmesg | tail -n 50
+
+## Auto-start on boot (systemd)
+Create service file:
+`/etc/systemd/system/rpi_multirec.service`
+
+```ini
+[Unit]
+Description=RPi Multi Recorder
+After=systemd-udev-settle.service sound.target
+Wants=systemd-udev-settle.service
+
+[Service]
+Type=simple
+WorkingDirectory=/home/hcenteno/rpi_multirec
+ExecStart=/home/hcenteno/rpi_multirec/build/rpi_multirec --hat-ui --mic spcmic
+Restart=on-failure
+RestartSec=2
+User=root
+Group=root
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Commands to apply:
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable rpi_multirec.service
+sudo systemctl start rpi_multirec.service
+sudo systemctl status rpi_multirec.service
+journalctl -u rpi_multirec.service -f
+```
+
+Reboot test:
+```bash
+sudo reboot
+```

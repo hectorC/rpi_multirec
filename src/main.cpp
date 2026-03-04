@@ -1716,7 +1716,7 @@ int main(int argc, char** argv) {
   auto next_status = std::chrono::steady_clock::now();
   const auto status_interval = std::chrono::milliseconds(opt.status_ms);
   auto next_battery_poll = std::chrono::steady_clock::now();
-  const auto battery_interval = std::chrono::seconds(1);
+  const auto battery_interval = std::chrono::seconds(10);
   auto now_ms = []() -> int64_t {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
                std::chrono::steady_clock::now().time_since_epoch())
