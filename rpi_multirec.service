@@ -1,0 +1,18 @@
+[Unit]
+Description=RPi Multi Recorder
+After=systemd-udev-settle.service sound.target
+Wants=systemd-udev-settle.service
+
+[Service]
+Type=simple
+WorkingDirectory=/home/hcenteno/rpi_multirec
+ExecStart=/home/hcenteno/rpi_multirec/build/rpi_multirec --hat-ui --mic spcmic
+Restart=on-failure
+RestartSec=2
+User=root
+Group=root
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
