@@ -88,7 +88,9 @@ Current behavior:
 - If the selected mic is not connected, the mic label is shown in red and recording start is disabled.
 - After `KEY1` stop, a new take cannot start until buffered audio is fully written and the file is closed.
 - During stop/finalize, elapsed time is held and shown in red; it resets to zero only after finalize completes.
-- Display shows recording state, elapsed time, mic preset/custom, rate/channels, XRUNs, and dropped MB.
+- Display shows recording state, elapsed time, mic preset/custom, rate/channels, XRUNs, dropped MB, battery %, and remaining record time.
+- Remaining record time is shown as `HH:MM:SS` at the bottom-left and is computed from free storage and current byte rate.
+- Remaining-time text warning colors: white normally, orange below 30 minutes, red below 10 minutes, and `--:--:--` if storage query fails.
 - Multiple takes are supported in one app run.
 - With auto naming, each take gets a fresh `<mic>_YYYYMMDD_HHMMSS.rf64` file.
 - If `--out` is provided, take 1 uses that filename and take 2+ use `_takeNNN` suffixes.

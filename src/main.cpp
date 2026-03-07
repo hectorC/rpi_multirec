@@ -26,6 +26,7 @@
 #include <gpiod.h>
 #include <linux/i2c-dev.h>
 #include <linux/spi/spidev.h>
+#include <sys/statvfs.h>
 #include <sys/ioctl.h>
 #include <unistd.h>
 #endif
@@ -120,6 +121,36 @@ bool EnsureParentDirectoryExists(const std::string& file_path,
     }
     return false;
   }
+}
+
+bool GetFreeBytesForPath(const std::string& file_path, uint64_t* free_bytes) {
+  if (!free_bytes) {
+    return false;
+  }
+#ifdef __linux__
+  try {
+    std::filesystem::path p(file_path);
+    std::filesystem::path dir = p;
+    if (!std::filesystem::is_directory(dir)) {
+      dir = p.parent_path();
+    }
+    if (dir.empty()) {
+      dir = std::filesystem::path(kDefaultRecordingsDir);
+    }
+    struct statvfs s {};
+    if (statvfs(dir.c_str(), &s) != 0) {
+      return false;
+    }
+    *free_bytes =
+        static_cast<uint64_t>(s.f_bavail) * static_cast<uint64_t>(s.f_frsize);
+    return true;
+  } catch (...) {
+    return false;
+  }
+#else
+  (void)file_path;
+  return false;
+#endif
 }
 
 std::string BuildManualTakePath(const std::string& base_path, int take_index) {
@@ -733,6 +764,8 @@ struct UiSnapshot {
   bool mic_connected = true;
   bool battery_valid = false;
   int battery_pct = 0;
+  bool storage_valid = false;
+  uint64_t remaining_storage_sec = 0;
   bool finalize_pending = false;
   unsigned int rate = 0;
   int channels = 0;
@@ -1005,6 +1038,20 @@ class WaveshareHatUi {
       bat_color = (snap.battery_pct <= 20) ? kRed : kWhite;
     }
     DrawText(bat_x, bat_y, bat, bat_color, bat_scale);
+
+    std::string rem = snap.storage_valid ? FormatHms(snap.remaining_storage_sec)
+                                         : "--:--:--";
+    uint16_t rem_color = kDarkGray;
+    if (snap.storage_valid) {
+      if (snap.remaining_storage_sec <= 600) {
+        rem_color = kRed;
+      } else if (snap.remaining_storage_sec <= 1800) {
+        rem_color = kOrange;
+      } else {
+        rem_color = kGreen;
+      }
+    }
+    DrawText(margin, bat_y, rem, rem_color, bat_scale);
 
     // DrawText(margin, 184, "KEY1:STOP KEY2:REC KEY3:BL", kDarkGray, 1);
     // DrawText(margin, 202, "L SPC R ZYL  U96 D48", kDarkGray, 1);
@@ -1329,6 +1376,8 @@ struct UiSnapshot {
   bool mic_connected = true;
   bool battery_valid = false;
   int battery_pct = 0;
+  bool storage_valid = false;
+  uint64_t remaining_storage_sec = 0;
   bool finalize_pending = false;
   unsigned int rate = 0;
   int channels = 0;
@@ -1658,6 +1707,9 @@ int main(int argc, char** argv) {
   std::atomic<int> zylia_gain_db{0};
   std::atomic<bool> battery_valid{false};
   std::atomic<int> battery_pct{0};
+  std::atomic<bool> storage_valid{false};
+  std::atomic<uint64_t> remaining_storage_sec{0};
+  std::atomic<uint64_t> bytes_per_second{0};
   ZyliaGainControl zylia_gain_ctl;
   UpsHatBMonitor ups_hat_monitor;
 
@@ -1695,12 +1747,42 @@ int main(int argc, char** argv) {
       battery_valid.store(false);
     }
   };
+  auto PlannedOutputPath = [&]() -> std::string {
+    if (!current_out_path.empty() &&
+        (recording_active.load() || finalize_in_progress.load())) {
+      return current_out_path;
+    }
+    if (!opt.hat_ui) {
+      return opt.out_path;
+    }
+    if (opt.out_overridden) {
+      return BuildManualTakePath(opt.out_path, static_cast<int>(take_count + 1));
+    }
+    return BuildAutoOutPath(selected_mic);
+  };
+  auto RefreshStorageRemaining = [&]() {
+    const uint64_t bps = bytes_per_second.load();
+    if (bps == 0) {
+      storage_valid.store(false);
+      return;
+    }
+    uint64_t free_bytes = 0;
+    if (!GetFreeBytesForPath(PlannedOutputPath(), &free_bytes)) {
+      storage_valid.store(false);
+      return;
+    }
+    remaining_storage_sec.store(free_bytes / bps);
+    storage_valid.store(true);
+  };
   const std::string out_preview =
       opt.out_overridden
           ? opt.out_path
           : (std::string(kDefaultRecordingsDir) + "/" +
              MicKindToString(selected_mic) + "_YYYYMMDD_HHMMSS.rf64");
   RefreshZyliaGain();
+  bytes_per_second.store(static_cast<uint64_t>(actual_rate) *
+                         static_cast<uint64_t>(bytes_per_frame));
+  RefreshStorageRemaining();
   if (opt.hat_ui) {
     if (ups_hat_monitor.Open()) {
       RefreshBatteryStatus();
@@ -1752,6 +1834,8 @@ int main(int argc, char** argv) {
   const auto status_interval = std::chrono::milliseconds(opt.status_ms);
   auto next_battery_poll = std::chrono::steady_clock::now();
   const auto battery_interval = std::chrono::seconds(10);
+  auto next_storage_poll = std::chrono::steady_clock::now();
+  const auto storage_interval = std::chrono::seconds(2);
   auto now_ms = []() -> int64_t {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
                std::chrono::steady_clock::now().time_since_epoch())
@@ -1961,6 +2045,8 @@ int main(int argc, char** argv) {
     snap.mic_connected = mic_available.load();
     snap.battery_valid = battery_valid.load();
     snap.battery_pct = battery_pct.load();
+    snap.storage_valid = storage_valid.load();
+    snap.remaining_storage_sec = remaining_storage_sec.load();
     snap.rate = actual_rate;
     snap.channels = current_channels;
     snap.zylia_gain_valid = zylia_gain_valid.load();
@@ -2062,11 +2148,17 @@ int main(int argc, char** argv) {
   }
 
   while (g_running.load()) {
-    if (opt.hat_ui && ups_hat_monitor.IsOpen()) {
+    if (opt.hat_ui) {
       const auto now = std::chrono::steady_clock::now();
       if (now >= next_battery_poll) {
-        RefreshBatteryStatus();
+        if (ups_hat_monitor.IsOpen()) {
+          RefreshBatteryStatus();
+        }
         next_battery_poll = now + battery_interval;
+      }
+      if (now >= next_storage_poll) {
+        RefreshStorageRemaining();
+        next_storage_poll = now + storage_interval;
       }
     }
 
@@ -2131,6 +2223,9 @@ int main(int argc, char** argv) {
           g_running.store(false);
           break;
         }
+        bytes_per_second.store(static_cast<uint64_t>(actual_rate) *
+                               static_cast<uint64_t>(bytes_per_frame));
+        RefreshStorageRemaining();
         RefreshZyliaGain();
         {
           std::lock_guard<std::mutex> lock(ring_mutex);
