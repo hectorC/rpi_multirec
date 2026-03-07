@@ -22,12 +22,12 @@ cmake --build build -j
 ## Run
 Example (48 kHz):
 ```bash
-./build/rpi_multirec --device hw:1,0 --rate 48000 --out /home/pi/capture.rf64
+./build/rpi_multirec --device hw:1,0 --rate 48000 --out capture.rf64
 ```
 
 Example (96 kHz, larger ring buffer):
 ```bash
-./build/rpi_multirec --device hw:1,0 --rate 96000 --ring-ms 3000 --out /home/pi/capture.rf64
+./build/rpi_multirec --device hw:1,0 --rate 96000 --ring-ms 3000 --out capture.rf64
 ```
 
 ## Options
@@ -62,13 +62,18 @@ Explicit `--device`, `--channels`, and `--access` arguments override the preset 
 
 ## Automatic file naming
 If `--out` is not provided, the app auto-generates the filename as:
-`<mic>_YYYYMMDD_HHMMSS.rf64`
+`/srv/rpi_multirec/recordings/<mic>_YYYYMMDD_HHMMSS.rf64`
 
 Examples:
-- `spcmic_20260222_143015.rf64`
-- `zylia_20260222_143045.rf64`
+- `/srv/rpi_multirec/recordings/spcmic_20260222_143015.rf64`
+- `/srv/rpi_multirec/recordings/zylia_20260222_143045.rf64`
 
 Auto naming requires `--mic spcmic|zylia`.
+
+Output directory behavior:
+- Default location is `/srv/rpi_multirec/recordings`.
+- If `--out` is relative (for example `--out take01.rf64`), it is saved under `/srv/rpi_multirec/recordings` (`/srv/rpi_multirec/recordings/take01.rf64`).
+- If `--out` is absolute, that absolute path is used.
 
 ## Waveshare 1.3inch LCD HAT
 The app supports the Waveshare SPI HAT with `--hat-ui`.
@@ -173,3 +178,68 @@ Reboot test:
 ```bash
 sudo reboot
 ```
+
+## Samba + Avahi setup (one-time)
+Install packages:
+```bash
+sudo apt update
+sudo apt install -y samba avahi-daemon avahi-utils smbclient libnss-mdns
+```
+
+Set hostname used by mDNS:
+```bash
+sudo hostnamectl set-hostname rpirec
+```
+
+Create shared recordings directory:
+```bash
+sudo mkdir -p /srv/rpi_multirec/recordings
+sudo chown root:root /srv/rpi_multirec/recordings
+sudo chmod 755 /srv/rpi_multirec/recordings
+```
+
+Create Samba user:
+```bash
+sudo adduser --disabled-password --gecos "" recshare
+sudo smbpasswd -a recshare
+```
+
+Add this share block to `/etc/samba/smb.conf`:
+```ini
+[recordings]
+path = /srv/rpi_multirec/recordings
+browseable = yes
+read only = yes
+valid users = recshare
+guest ok = no
+```
+
+Optional in `[global]`:
+```ini
+server min protocol = SMB2
+```
+
+Validate and start services:
+```bash
+sudo testparm -s
+sudo systemctl enable --now smbd avahi-daemon
+sudo systemctl restart smbd avahi-daemon
+```
+
+Verify:
+```bash
+sudo systemctl status smbd --no-pager
+sudo systemctl status avahi-daemon --no-pager
+avahi-resolve-host-name rpirec.local
+smbclient -L //localhost -U recshare
+```
+
+Client access:
+- Windows: `\\rpirec.local\recordings` or `\\<PI_IP>\recordings`
+- macOS Finder: `smb://rpirec.local/recordings`
+- login user: recshare
+- login password: [blank]
+
+Notes:
+- Keep Avahi enabled.
+- For reliability, avoid file transfers during recording.

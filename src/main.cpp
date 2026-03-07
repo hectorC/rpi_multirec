@@ -13,6 +13,7 @@
 #include <cstring>
 #include <ctime>
 #include <iomanip>
+#include <filesystem>
 #include <memory>
 #include <mutex>
 #include <sstream>
@@ -61,6 +62,7 @@ struct Options {
 };
 
 std::atomic<bool> g_running{true};
+constexpr const char* kDefaultRecordingsDir = "/srv/rpi_multirec/recordings";
 
 void HandleSignal(int) {
   g_running.store(false);
@@ -86,8 +88,38 @@ std::string BuildAutoOutPath(MicKind mic) {
   localtime_r(&now, &tm_now);
 #endif
   std::ostringstream oss;
-  oss << mic_name << "_" << std::put_time(&tm_now, "%Y%m%d_%H%M%S") << ".rf64";
+  oss << kDefaultRecordingsDir << "/" << mic_name << "_"
+      << std::put_time(&tm_now, "%Y%m%d_%H%M%S") << ".rf64";
   return oss.str();
+}
+
+std::string EnsureRecordingsPath(const std::string& path) {
+  if (path.empty()) {
+    return path;
+  }
+  const std::filesystem::path p(path);
+  if (p.is_absolute()) {
+    return path;
+  }
+  return (std::filesystem::path(kDefaultRecordingsDir) / p).string();
+}
+
+bool EnsureParentDirectoryExists(const std::string& file_path,
+                                 std::string* error) {
+  try {
+    const std::filesystem::path p(file_path);
+    const std::filesystem::path parent = p.parent_path();
+    if (parent.empty()) {
+      return true;
+    }
+    std::filesystem::create_directories(parent);
+    return true;
+  } catch (const std::exception& e) {
+    if (error) {
+      *error = e.what();
+    }
+    return false;
+  }
 }
 
 std::string BuildManualTakePath(const std::string& base_path, int take_index) {
@@ -136,6 +168,7 @@ void PrintUsage(const char* exe) {
       "\n"
       "Auto naming:\n"
       "  If --out is omitted: <mic>_YYYYMMDD_HHMMSS.rf64\n"
+      "  Default output directory: /srv/rpi_multirec/recordings\n"
       "  Auto naming requires --mic spcmic|zylia.\n"
       "\n"
       "Waveshare HAT controls:\n"
@@ -1394,6 +1427,8 @@ int main(int argc, char** argv) {
     if (!opt.hat_ui) {
       opt.out_path = BuildAutoOutPath(opt.mic);
     }
+  } else {
+    opt.out_path = EnsureRecordingsPath(opt.out_path);
   }
 
   std::signal(SIGINT, HandleSignal);
@@ -1663,8 +1698,8 @@ int main(int argc, char** argv) {
   const std::string out_preview =
       opt.out_overridden
           ? opt.out_path
-          : (std::string(MicKindToString(selected_mic)) +
-             "_YYYYMMDD_HHMMSS.rf64");
+          : (std::string(kDefaultRecordingsDir) + "/" +
+             MicKindToString(selected_mic) + "_YYYYMMDD_HHMMSS.rf64");
   RefreshZyliaGain();
   if (opt.hat_ui) {
     if (ups_hat_monitor.Open()) {
@@ -1823,6 +1858,13 @@ int main(int argc, char** argv) {
     }
     dropped_bytes.store(0);
     xrun_count.store(0);
+
+    std::string mkdir_error;
+    if (!EnsureParentDirectoryExists(current_out_path, &mkdir_error)) {
+      std::fprintf(stderr, "Failed to create output directory for %s: %s\n",
+                   current_out_path.c_str(), mkdir_error.c_str());
+      return false;
+    }
 
     SF_INFO info{};
     info.samplerate = static_cast<int>(actual_rate);
