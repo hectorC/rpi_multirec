@@ -206,7 +206,8 @@ void PrintUsage(const char* exe) {
       "  With --hat-ui the app starts in IDLE.\n"
       "  KEY2 = MON from IDLE, then KEY2 again = REC\n"
       "  KEY1 = stop (MON->IDLE or REC->stop/finalize)\n"
-      "  KEY3 = backlight toggle\n"
+      "  KEY3 short release = backlight toggle\n"
+      "  KEY3 hold 5s = power off after clean shutdown\n"
       "  Joystick LEFT/RIGHT (IDLE only) = select spcmic/zylia preset\n"
       "  SPCMIC: Joystick UP/DOWN (IDLE only) = select 96kHz/48kHz\n"
       "  ZYLIA: Joystick UP/DOWN (IDLE/MON/REC) = Master Gain +/-1 dB (hold to repeat)\n"
@@ -890,13 +891,16 @@ class WaveshareHatUi {
   }
 
   void PollButtons(bool* start, bool* stop, bool* mic_left, bool* mic_right,
-                   bool* rate_up, bool* rate_down, bool repeat_ud = false) {
+                   bool* rate_up, bool* rate_down, bool* backlight_toggle,
+                   bool* poweroff, bool repeat_ud = false) {
     if (start) *start = false;
     if (stop) *stop = false;
     if (mic_left) *mic_left = false;
     if (mic_right) *mic_right = false;
     if (rate_up) *rate_up = false;
     if (rate_down) *rate_down = false;
+    if (backlight_toggle) *backlight_toggle = false;
+    if (poweroff) *poweroff = false;
     const int key1 = ReadGpio(btn_[0]);
     const int key2 = ReadGpio(btn_[1]);
     const int key3 = ReadGpio(btn_[2]);
@@ -938,9 +942,21 @@ class WaveshareHatUi {
     if (start && edge(1, key2)) {
       *start = true;
     }
-    if (edge(2, key3)) {
-      backlight_on_ = !backlight_on_;
-      WriteGpio(bl_, backlight_on_ ? 1 : 0);
+    if (pressed(2, key3) && !was_pressed(2)) {
+      key3_press_started_ = now;
+      key3_poweroff_fired_ = false;
+    } else if (pressed(2, key3) && was_pressed(2) && !key3_poweroff_fired_ &&
+               now - key3_press_started_ >= std::chrono::seconds(5)) {
+      key3_poweroff_fired_ = true;
+      if (poweroff) {
+        *poweroff = true;
+      }
+    } else if (!pressed(2, key3) && was_pressed(2)) {
+      if (!key3_poweroff_fired_ && backlight_toggle) {
+        *backlight_toggle = true;
+      }
+      key3_press_started_ = std::chrono::steady_clock::time_point{};
+      key3_poweroff_fired_ = false;
     }
     if (mic_left && edge(5, joy_left)) {
       *mic_left = true;
@@ -957,6 +973,38 @@ class WaveshareHatUi {
     if (joy_down >= 0) last_btn_[4] = joy_down;
     if (joy_left >= 0) last_btn_[5] = joy_left;
     if (joy_right >= 0) last_btn_[6] = joy_right;
+  }
+
+  void ToggleBacklight() {
+    backlight_on_ = !backlight_on_;
+    WriteGpio(bl_, backlight_on_ ? 1 : 0);
+  }
+
+  bool ShowPoweroffMessage() {
+    backlight_on_ = true;
+    WriteGpio(bl_, 1);
+    Clear(kBlack);
+    constexpr const char* kTitle = "Powering off!";
+    constexpr const char* kLine1 = "Wait for the";
+    constexpr const char* kLine2 = "green LED to";
+    constexpr const char* kLine3 = "stop blinking,";
+    constexpr const char* kLine4 = "then turn switch off";
+    constexpr int kTitleScale = 3;
+    constexpr int kBodyScale = 2;
+
+    const int title_w = static_cast<int>(std::strlen(kTitle)) * 6 * kTitleScale;
+    const int title_x = std::max(0, (kWidth - title_w) / 2);
+    DrawText(title_x, 18, kTitle, kWhite, kTitleScale);
+
+    const int line1_w = static_cast<int>(std::strlen(kLine1)) * 6 * kBodyScale;
+    const int line2_w = static_cast<int>(std::strlen(kLine2)) * 6 * kBodyScale;
+    const int line3_w = static_cast<int>(std::strlen(kLine3)) * 6 * kBodyScale;
+    const int line4_w = static_cast<int>(std::strlen(kLine4)) * 6 * kBodyScale;
+    DrawText(std::max(0, (kWidth - line1_w) / 2), 78, kLine1, kCyan, kBodyScale);
+    DrawText(std::max(0, (kWidth - line2_w) / 2), 98, kLine2, kCyan, kBodyScale);
+    DrawText(std::max(0, (kWidth - line3_w) / 2), 118, kLine3, kCyan, kBodyScale);
+    DrawText(std::max(0, (kWidth - line4_w) / 2), 138, kLine4, kCyan, kBodyScale);
+    return Flush();
   }
 
   bool Render(const UiSnapshot& snap) {
@@ -1153,6 +1201,7 @@ class WaveshareHatUi {
     static const uint8_t sp[] = {0x00, 0x00, 0x00, 0x00, 0x00};
     static const uint8_t dash[] = {0x08, 0x08, 0x08, 0x08, 0x08};
     static const uint8_t colon[] = {0x00, 0x36, 0x36, 0x00, 0x00};
+    static const uint8_t dot[] = {0x00, 0x60, 0x60, 0x00, 0x00};
     static const uint8_t p0[] = {0x3E, 0x51, 0x49, 0x45, 0x3E};
     static const uint8_t p1[] = {0x00, 0x42, 0x7F, 0x40, 0x00};
     static const uint8_t p2[] = {0x42, 0x61, 0x51, 0x49, 0x46};
@@ -1168,6 +1217,7 @@ class WaveshareHatUi {
     static const uint8_t c2[] = {0x3E, 0x41, 0x41, 0x41, 0x22};
     static const uint8_t d[] = {0x7F, 0x41, 0x41, 0x22, 0x1C};
     static const uint8_t e[] = {0x7F, 0x49, 0x49, 0x49, 0x41};
+    static const uint8_t f[] = {0x7F, 0x09, 0x09, 0x09, 0x01};
     static const uint8_t g[] = {0x3E, 0x41, 0x49, 0x49, 0x7A};
     static const uint8_t h[] = {0x7F, 0x08, 0x08, 0x08, 0x7F};
     static const uint8_t i[] = {0x00, 0x41, 0x7F, 0x41, 0x00};
@@ -1181,6 +1231,7 @@ class WaveshareHatUi {
     static const uint8_t s[] = {0x46, 0x49, 0x49, 0x49, 0x31};
     static const uint8_t t[] = {0x01, 0x01, 0x7F, 0x01, 0x01};
     static const uint8_t u[] = {0x3F, 0x40, 0x40, 0x40, 0x3F};
+    static const uint8_t w[] = {0x7F, 0x20, 0x18, 0x20, 0x7F};
     static const uint8_t x[] = {0x63, 0x14, 0x08, 0x14, 0x63};
     static const uint8_t y[] = {0x03, 0x04, 0x78, 0x04, 0x03};
     static const uint8_t z[] = {0x61, 0x51, 0x49, 0x45, 0x43};
@@ -1201,6 +1252,7 @@ class WaveshareHatUi {
       case 'C': return c2;
       case 'D': return d;
       case 'E': return e;
+      case 'F': return f;
       case 'G': return g;
       case 'H': return h;
       case 'I': return i;
@@ -1214,10 +1266,12 @@ class WaveshareHatUi {
       case 'S': return s;
       case 'T': return t;
       case 'U': return u;
+      case 'W': return w;
       case 'X': return x;
       case 'Y': return y;
       case 'Z': return z;
       case ':': return colon;
+      case '.': return dot;
       case '-': return dash;
       case ' ': return sp;
       default: return sp;
@@ -1361,6 +1415,8 @@ class WaveshareHatUi {
   int last_btn_[8] = {1, 1, 1, 1, 1, 1, 1, 1};
   int idle_btn_[8] = {1, 1, 1, 1, 1, 1, 1, 1};
   std::chrono::steady_clock::time_point next_repeat_[8];
+  std::chrono::steady_clock::time_point key3_press_started_;
+  bool key3_poweroff_fired_ = false;
   bool backlight_on_ = true;
   std::string last_error_;
   std::vector<uint8_t> frame_ =
@@ -1396,7 +1452,8 @@ class WaveshareHatUi {
   const std::string& LastError() const { return last_error_; }
   void Shutdown() {}
   void PollButtons(bool* start, bool* stop, bool* mic_left, bool* mic_right,
-                   bool* rate_up, bool* rate_down, bool repeat_ud = false) {
+                   bool* rate_up, bool* rate_down, bool* backlight_toggle,
+                   bool* poweroff, bool repeat_ud = false) {
     (void)repeat_ud;
     if (start) *start = false;
     if (stop) *stop = false;
@@ -1404,7 +1461,11 @@ class WaveshareHatUi {
     if (mic_right) *mic_right = false;
     if (rate_up) *rate_up = false;
     if (rate_down) *rate_down = false;
+    if (backlight_toggle) *backlight_toggle = false;
+    if (poweroff) *poweroff = false;
   }
+  void ToggleBacklight() {}
+  bool ShowPoweroffMessage() { return false; }
   bool Render(const UiSnapshot&) { return false; }
  private:
   std::string last_error_ = "Not supported on non-Linux build";
@@ -1699,6 +1760,7 @@ int main(int argc, char** argv) {
   std::atomic<bool> mic_right_requested{false};
   std::atomic<bool> rate_up_requested{false};
   std::atomic<bool> rate_down_requested{false};
+  std::atomic<bool> poweroff_requested{false};
   std::atomic<int64_t> record_start_ms{0};
   std::atomic<uint64_t> finalize_elapsed_sec{0};
   std::atomic<int> peak_percent{0};
@@ -2080,6 +2142,7 @@ int main(int argc, char** argv) {
 
   std::unique_ptr<WaveshareHatUi> hat_ui;
   std::thread ui_thread;
+  bool poweroff_after_shutdown = false;
   if (opt.hat_ui) {
 #ifdef __linux__
     hat_ui = std::make_unique<WaveshareHatUi>();
@@ -2103,8 +2166,11 @@ int main(int argc, char** argv) {
         bool mic_right_evt = false;
         bool rate_up_evt = false;
         bool rate_down_evt = false;
+        bool backlight_toggle_evt = false;
+        bool poweroff_evt = false;
         hat_ui->PollButtons(&start_evt, &stop_evt, &mic_left_evt,
                             &mic_right_evt, &rate_up_evt, &rate_down_evt,
+                            &backlight_toggle_evt, &poweroff_evt,
                             joy_ud_repeat.load());
         if (start_evt && !finalize_in_progress.load()) {
           start_requested.store(true);
@@ -2123,6 +2189,12 @@ int main(int argc, char** argv) {
         }
         if (rate_down_evt) {
           rate_down_requested.store(true);
+        }
+        if (backlight_toggle_evt) {
+          hat_ui->ToggleBacklight();
+        }
+        if (poweroff_evt) {
+          poweroff_requested.store(true);
         }
         hat_ui->Render(make_ui_snapshot());
         std::this_thread::sleep_for(std::chrono::milliseconds(150));
@@ -2148,6 +2220,12 @@ int main(int argc, char** argv) {
   }
 
   while (g_running.load()) {
+    if (poweroff_requested.exchange(false)) {
+      poweroff_after_shutdown = true;
+      g_running.store(false);
+      continue;
+    }
+
     if (opt.hat_ui) {
       const auto now = std::chrono::steady_clock::now();
       if (now >= next_battery_poll) {
@@ -2441,6 +2519,10 @@ int main(int argc, char** argv) {
   if (ui_thread.joinable()) {
     ui_thread.join();
   }
+  if (poweroff_after_shutdown && hat_ui) {
+    hat_ui->ShowPoweroffMessage();
+    std::this_thread::sleep_for(std::chrono::milliseconds(3000));
+  }
   if (hat_ui) {
     hat_ui->Shutdown();
   }
@@ -2458,6 +2540,20 @@ int main(int argc, char** argv) {
                static_cast<unsigned long long>(take_count),
                static_cast<unsigned long long>(xrun_count.load()),
                static_cast<unsigned long long>(dropped_bytes.load()));
+  if (poweroff_after_shutdown) {
+#ifdef __linux__
+    std::fprintf(stdout, "Powering off...\n");
+    const int rc = std::system("systemctl poweroff");
+    if (rc != 0) {
+      std::fprintf(stderr, "systemctl poweroff failed with exit code %d\n", rc);
+      return 1;
+    }
+    return 0;
+#else
+    std::fprintf(stderr, "Poweroff is only supported on Linux.\n");
+    return 1;
+#endif
+  }
   if (writer_error.load()) {
     return 1;
   }

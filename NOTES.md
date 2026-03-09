@@ -80,17 +80,19 @@ The app supports the Waveshare SPI HAT with `--hat-ui`.
 
 Current behavior:
 - App starts in `IDLE` when `--hat-ui` is enabled.
-- `KEY2` starts recording.
+- `KEY2` enters `MON` from `IDLE`, then starts recording from `MON`.
 - `KEY1` stops the current take and returns to `IDLE` (multi-take session).
-- `KEY3` toggles LCD backlight.
+- `KEY3` short release toggles LCD backlight.
+- `KEY3` hold for 5 seconds requests a clean shutdown and then powers off the Pi.
+- Before power-off, the UI is cleared and shows a centered `Powering off...` message.
 - Joystick `LEFT/RIGHT` in `IDLE` selects `spcmic`/`zylia` preset for the next take.
-- Joystick `UP/DOWN` in `IDLE` selects `96 kHz`/`48 kHz`.
+- Joystick `UP/DOWN` changes `spcmic` rate in `IDLE`, and changes Zylia gain in `IDLE`/`MON`/`REC`.
 - If the selected mic is not connected, the mic label is shown in red and recording start is disabled.
 - After `KEY1` stop, a new take cannot start until buffered audio is fully written and the file is closed.
 - During stop/finalize, elapsed time is held and shown in red; it resets to zero only after finalize completes.
 - Display shows recording state, elapsed time, mic preset/custom, rate/channels, XRUNs, dropped MB, battery %, and remaining record time.
 - Remaining record time is shown as `HH:MM:SS` at the bottom-left and is computed from free storage and current byte rate.
-- Remaining-time text warning colors: white normally, orange below 30 minutes, red below 10 minutes, and `--:--:--` if storage query fails.
+- Remaining-time text warning colors: green normally, orange below 30 minutes, red below 10 minutes, and `--:--:--` if storage query fails.
 - Multiple takes are supported in one app run.
 - With auto naming, each take gets a fresh `<mic>_YYYYMMDD_HHMMSS.rf64` file.
 - If `--out` is provided, take 1 uses that filename and take 2+ use `_takeNNN` suffixes.
