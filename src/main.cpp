@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cerrno>
+#include <cctype>
 #include <chrono>
 #include <condition_variable>
 #include <csignal>
@@ -14,6 +15,7 @@
 #include <ctime>
 #include <iomanip>
 #include <filesystem>
+#include <fstream>
 #include <memory>
 #include <mutex>
 #include <sstream>
@@ -64,6 +66,9 @@ struct Options {
 
 std::atomic<bool> g_running{true};
 constexpr const char* kDefaultRecordingsDir = "/srv/rpi_multirec/recordings";
+std::string g_recordings_dir = kDefaultRecordingsDir;
+
+const std::string& RecordingsDir() { return g_recordings_dir; }
 
 void HandleSignal(int) {
   g_running.store(false);
@@ -89,7 +94,7 @@ std::string BuildAutoOutPath(MicKind mic) {
   localtime_r(&now, &tm_now);
 #endif
   std::ostringstream oss;
-  oss << kDefaultRecordingsDir << "/" << mic_name << "_"
+  oss << RecordingsDir() << "/" << mic_name << "_"
       << std::put_time(&tm_now, "%Y%m%d_%H%M%S") << ".rf64";
   return oss.str();
 }
@@ -102,7 +107,7 @@ std::string EnsureRecordingsPath(const std::string& path) {
   if (p.is_absolute()) {
     return path;
   }
-  return (std::filesystem::path(kDefaultRecordingsDir) / p).string();
+  return (std::filesystem::path(RecordingsDir()) / p).string();
 }
 
 bool EnsureParentDirectoryExists(const std::string& file_path,
@@ -135,7 +140,7 @@ bool GetFreeBytesForPath(const std::string& file_path, uint64_t* free_bytes) {
       dir = p.parent_path();
     }
     if (dir.empty()) {
-      dir = std::filesystem::path(kDefaultRecordingsDir);
+      dir = std::filesystem::path(RecordingsDir());
     }
     struct statvfs s {};
     if (statvfs(dir.c_str(), &s) != 0) {
@@ -151,6 +156,68 @@ bool GetFreeBytesForPath(const std::string& file_path, uint64_t* free_bytes) {
   (void)file_path;
   return false;
 #endif
+}
+
+std::string DecodeMountPath(const std::string& path) {
+  std::string decoded;
+  decoded.reserve(path.size());
+  for (size_t i = 0; i < path.size(); ++i) {
+    if (path[i] == '\\' && i + 3 < path.size() &&
+        std::isdigit(static_cast<unsigned char>(path[i + 1])) &&
+        std::isdigit(static_cast<unsigned char>(path[i + 2])) &&
+        std::isdigit(static_cast<unsigned char>(path[i + 3]))) {
+      const int value =
+          (path[i + 1] - '0') * 64 + (path[i + 2] - '0') * 8 + (path[i + 3] - '0');
+      decoded.push_back(static_cast<char>(value));
+      i += 3;
+    } else {
+      decoded.push_back(path[i]);
+    }
+  }
+  return decoded;
+}
+
+std::string DetectExternalRecordingsDir() {
+#ifdef __linux__
+  std::ifstream mounts("/proc/mounts");
+  if (!mounts.is_open()) {
+    return {};
+  }
+
+  std::string device;
+  std::string mount_point;
+  std::string fs_type;
+  std::string options;
+  while (mounts >> device >> mount_point >> fs_type >> options) {
+    std::string rest;
+    std::getline(mounts, rest);
+    if (fs_type != "exfat" && fs_type != "exfat-fuse") {
+      continue;
+    }
+
+    const std::filesystem::path mount_path(DecodeMountPath(mount_point));
+    std::error_code ec;
+    if (!std::filesystem::exists(mount_path, ec) ||
+        !std::filesystem::is_directory(mount_path, ec)) {
+      continue;
+    }
+    const std::filesystem::path candidate = mount_path / "rpi_multirec";
+    std::filesystem::create_directories(candidate, ec);
+    if (ec) {
+      continue;
+    }
+    const auto perms = std::filesystem::status(candidate, ec).permissions();
+    if (ec || perms == std::filesystem::perms::unknown ||
+        perms == std::filesystem::perms::none) {
+      continue;
+    }
+    if (access(candidate.c_str(), W_OK) != 0) {
+      continue;
+    }
+    return candidate.string();
+  }
+#endif
+  return {};
 }
 
 std::string BuildManualTakePath(const std::string& base_path, int take_index) {
@@ -200,6 +267,8 @@ void PrintUsage(const char* exe) {
       "Auto naming:\n"
       "  If --out is omitted: <mic>_YYYYMMDD_HHMMSS.rf64\n"
       "  Default output directory: /srv/rpi_multirec/recordings\n"
+      "  If exFAT external storage is mounted at startup, files go to\n"
+      "  <mount>/rpi_multirec instead.\n"
       "  Auto naming requires --mic spcmic|zylia.\n"
       "\n"
       "Waveshare HAT controls:\n"
@@ -761,6 +830,7 @@ class UpsHatBMonitor {
 struct UiSnapshot {
   bool recording = false;
   bool monitoring = false;
+  bool external_storage = false;
   std::string mic;
   bool mic_connected = true;
   bool battery_valid = false;
@@ -988,7 +1058,8 @@ class WaveshareHatUi {
     constexpr const char* kLine1 = "Wait for the";
     constexpr const char* kLine2 = "green LED to";
     constexpr const char* kLine3 = "stop blinking,";
-    constexpr const char* kLine4 = "then turn switch off";
+    constexpr const char* kLine4 = "then";
+    constexpr const char* kLine5 = "turn switch off";
     constexpr int kTitleScale = 3;
     constexpr int kBodyScale = 2;
 
@@ -1000,10 +1071,12 @@ class WaveshareHatUi {
     const int line2_w = static_cast<int>(std::strlen(kLine2)) * 6 * kBodyScale;
     const int line3_w = static_cast<int>(std::strlen(kLine3)) * 6 * kBodyScale;
     const int line4_w = static_cast<int>(std::strlen(kLine4)) * 6 * kBodyScale;
+    const int line5_w = static_cast<int>(std::strlen(kLine5)) * 6 * kBodyScale;
     DrawText(std::max(0, (kWidth - line1_w) / 2), 78, kLine1, kCyan, kBodyScale);
     DrawText(std::max(0, (kWidth - line2_w) / 2), 98, kLine2, kCyan, kBodyScale);
     DrawText(std::max(0, (kWidth - line3_w) / 2), 118, kLine3, kCyan, kBodyScale);
     DrawText(std::max(0, (kWidth - line4_w) / 2), 138, kLine4, kCyan, kBodyScale);
+    DrawText(std::max(0, (kWidth - line5_w) / 2), 158, kLine5, kCyan, kBodyScale);
     return Flush();
   }
 
@@ -1023,8 +1096,12 @@ class WaveshareHatUi {
     DrawText(146, 6, state, kWhite, 3);
 
     DrawText(margin, 22, "ELAP", kCyan, 2);
-    DrawText(margin, 43, FormatHms(snap.elapsed_sec),
-             snap.finalize_pending ? kRed : kYellow, 4);
+    const std::string elapsed = FormatHms(snap.elapsed_sec);
+    DrawText(margin, 43, elapsed, snap.finalize_pending ? kRed : kYellow, 4);
+    if (snap.external_storage) {
+      const int elapsed_w = static_cast<int>(elapsed.size()) * 6 * 4;
+      DrawText(margin + elapsed_w + 8, 49, "E", kOrange, 2);
+    }
 
     DrawText(margin, 86, "PEAK", kCyan, 2);
     const int meter_x = margin + 54;
@@ -1428,6 +1505,7 @@ class WaveshareHatUi {
 struct UiSnapshot {
   bool recording = false;
   bool monitoring = false;
+  bool external_storage = false;
   std::string mic;
   bool mic_connected = true;
   bool battery_valid = false;
@@ -1526,6 +1604,11 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "--hat-ui does not support --stdin-raw\n");
     return 1;
   }
+
+  const std::string external_recordings_dir = DetectExternalRecordingsDir();
+  const bool use_external_storage = !external_recordings_dir.empty();
+  g_recordings_dir =
+      use_external_storage ? external_recordings_dir : kDefaultRecordingsDir;
 
   if (!opt.out_overridden) {
     if (!opt.hat_ui && opt.mic == MicKind::kUnspecified) {
@@ -1772,6 +1855,7 @@ int main(int argc, char** argv) {
   std::atomic<bool> storage_valid{false};
   std::atomic<uint64_t> remaining_storage_sec{0};
   std::atomic<uint64_t> bytes_per_second{0};
+  std::atomic<bool> using_external_storage{use_external_storage};
   ZyliaGainControl zylia_gain_ctl;
   UpsHatBMonitor ups_hat_monitor;
 
@@ -1839,13 +1923,15 @@ int main(int argc, char** argv) {
   const std::string out_preview =
       opt.out_overridden
           ? opt.out_path
-          : (std::string(kDefaultRecordingsDir) + "/" +
+          : (RecordingsDir() + "/" +
              MicKindToString(selected_mic) + "_YYYYMMDD_HHMMSS.rf64");
   RefreshZyliaGain();
   bytes_per_second.store(static_cast<uint64_t>(actual_rate) *
                          static_cast<uint64_t>(bytes_per_frame));
   RefreshStorageRemaining();
   if (opt.hat_ui) {
+    std::fprintf(stdout, "Recording root: %s%s\n", RecordingsDir().c_str(),
+                 use_external_storage ? " (external)" : " (internal)");
     if (ups_hat_monitor.Open()) {
       RefreshBatteryStatus();
     } else {
@@ -2102,6 +2188,7 @@ int main(int argc, char** argv) {
     UiSnapshot snap;
     snap.recording = recording_active.load();
     snap.monitoring = monitoring_active.load();
+    snap.external_storage = using_external_storage.load();
     snap.finalize_pending = finalize_in_progress.load();
     snap.mic = MicKindToString(selected_mic);
     snap.mic_connected = mic_available.load();

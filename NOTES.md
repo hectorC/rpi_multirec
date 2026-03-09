@@ -72,8 +72,10 @@ Auto naming requires `--mic spcmic|zylia`.
 
 Output directory behavior:
 - Default location is `/srv/rpi_multirec/recordings`.
-- If `--out` is relative (for example `--out take01.rf64`), it is saved under `/srv/rpi_multirec/recordings` (`/srv/rpi_multirec/recordings/take01.rf64`).
+- If an exFAT external drive is already mounted when the app starts, the app writes to `<mount>/rpi_multirec` instead and creates that folder if needed.
+- If `--out` is relative (for example `--out take01.rf64`), it is saved under the active recordings root (`<root>/take01.rf64`).
 - If `--out` is absolute, that absolute path is used.
+- External storage detection currently happens only on app startup. Plugging a drive in later requires restarting the app.
 
 ## Waveshare 1.3inch LCD HAT
 The app supports the Waveshare SPI HAT with `--hat-ui`.
@@ -91,6 +93,7 @@ Current behavior:
 - After `KEY1` stop, a new take cannot start until buffered audio is fully written and the file is closed.
 - During stop/finalize, elapsed time is held and shown in red; it resets to zero only after finalize completes.
 - Display shows recording state, elapsed time, mic preset/custom, rate/channels, XRUNs, dropped MB, battery %, and remaining record time.
+- When external storage is active, an orange `E` appears to the right of the elapsed-time counter.
 - Remaining record time is shown as `HH:MM:SS` at the bottom-left and is computed from free storage and current byte rate.
 - Remaining-time text warning colors: green normally, orange below 30 minutes, red below 10 minutes, and `--:--:--` if storage query fails.
 - Multiple takes are supported in one app run.
@@ -157,6 +160,7 @@ Wants=systemd-udev-settle.service
 [Service]
 Type=simple
 WorkingDirectory=/home/hcenteno/rpi_multirec
+ExecStartPre=/bin/sh -c 'for i in $(seq 1 10); do grep -Eq " exfat(|-fuse) " /proc/mounts && exit 0; sleep 1; done; exit 0'
 ExecStart=/home/hcenteno/rpi_multirec/build/rpi_multirec --hat-ui --mic spcmic
 Restart=on-failure
 RestartSec=2
@@ -182,6 +186,8 @@ Reboot test:
 ```bash
 sudo reboot
 ```
+
+For external exFAT media, the `ExecStartPre` line above gives boot-time automount up to 10 seconds to complete before the app runs its one-time storage detection.
 
 ## Samba + Avahi setup (one-time)
 Install packages:
@@ -247,3 +253,54 @@ Client access:
 Notes:
 - Keep Avahi enabled.
 - For reliability, avoid file transfers during recording.
+
+## Headless USB automount on Raspberry Pi OS Lite
+Raspberry Pi OS Lite does not automatically mount arbitrary USB storage by default. To let the recorder use any exFAT USB drive present at startup, provision headless automount once:
+
+1. Install required packages:
+```bash
+sudo apt update
+sudo apt install -y udisks2 exfatprogs
+```
+
+2. Enable `udisks2`:
+```bash
+sudo systemctl enable --now udisks2
+```
+
+3. Create udev rule `/etc/udev/rules.d/99-rpi-multirec-automount.rules`:
+```udev
+ACTION=="add", SUBSYSTEM=="block", ENV{ID_FS_USAGE}=="filesystem", TAG+="systemd", ENV{SYSTEMD_WANTS}+="rpi-usb-automount@%k.service"
+```
+
+4. Create systemd template `/etc/systemd/system/rpi-usb-automount@.service`:
+```ini
+[Unit]
+Description=Auto-mount USB filesystem /dev/%I
+After=udisks2.service
+Requires=udisks2.service
+
+[Service]
+Type=oneshot
+ExecStartPre=/bin/sleep 1
+ExecStart=/usr/bin/udisksctl mount --block-device /dev/%I --no-user-interaction
+```
+
+5. Reload rules and services:
+```bash
+sudo udevadm control --reload
+sudo systemctl daemon-reload
+```
+
+6. Test:
+```bash
+lsblk -o NAME,FSTYPE,SIZE,MOUNTPOINT,LABEL
+udisksctl status
+cat /proc/mounts | grep exfat
+```
+
+7. Recorder behavior:
+- If an exFAT USB drive is already mounted when the app starts, recordings go to `<mount>/rpi_multirec`.
+- That folder is created automatically if missing.
+- If no suitable external drive is mounted, recordings stay on `/srv/rpi_multirec/recordings`.
+- Detection happens only on app startup for now; inserting a drive later requires restarting the app.
