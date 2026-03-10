@@ -104,6 +104,8 @@ Linux requirements:
 - SPI enabled (`/dev/spidev0.0` must exist).
 - GPIO and SPI device access permissions (`libgpiod` + `/dev/spidev0.0`).
 - If permissions block access, run with `sudo`.
+- On Linux, the capture loop now attempts to switch the current thread to `SCHED_FIFO` priority 20.
+- If this fails due to missing privilege, the app logs a warning and continues with normal scheduling.
 
 Example:
 ```bash

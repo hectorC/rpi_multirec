@@ -28,6 +28,7 @@
 #include <gpiod.h>
 #include <linux/i2c-dev.h>
 #include <linux/spi/spidev.h>
+#include <sched.h>
 #include <sys/statvfs.h>
 #include <sys/ioctl.h>
 #include <unistd.h>
@@ -218,6 +219,37 @@ std::string DetectExternalRecordingsDir() {
   }
 #endif
   return {};
+}
+
+bool ElevateCurrentThreadForCapture(int requested_priority, std::string* error,
+                                    int* applied_priority) {
+#ifdef __linux__
+  const int max_priority = sched_get_priority_max(SCHED_FIFO);
+  if (max_priority < 1) {
+    if (error) {
+      *error = "sched_get_priority_max(SCHED_FIFO) failed";
+    }
+    return false;
+  }
+
+  sched_param param {};
+  param.sched_priority = std::max(1, std::min(requested_priority, max_priority));
+  if (sched_setscheduler(0, SCHED_FIFO, &param) != 0) {
+    if (error) {
+      *error = std::strerror(errno);
+    }
+    return false;
+  }
+  if (applied_priority) {
+    *applied_priority = param.sched_priority;
+  }
+  return true;
+#else
+  (void)requested_priority;
+  (void)error;
+  (void)applied_priority;
+  return false;
+#endif
 }
 
 std::string BuildManualTakePath(const std::string& base_path, int take_index) {
@@ -2305,6 +2337,22 @@ int main(int argc, char** argv) {
       g_running.store(false);
     }
   }
+
+#ifdef __linux__
+  {
+    std::string rt_error;
+    int applied_priority = 0;
+    if (ElevateCurrentThreadForCapture(20, &rt_error, &applied_priority)) {
+      std::fprintf(stdout,
+                   "Capture thread scheduling: SCHED_FIFO priority %d\n",
+                   applied_priority);
+    } else {
+      std::fprintf(stdout,
+                   "Warning: failed to enable realtime capture scheduling: %s\n",
+                   rt_error.c_str());
+    }
+  }
+#endif
 
   while (g_running.load()) {
     if (poweroff_requested.exchange(false)) {
