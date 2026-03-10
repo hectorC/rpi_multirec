@@ -219,9 +219,12 @@ Add this share block to `/etc/samba/smb.conf`:
 [recordings]
 path = /srv/rpi_multirec/recordings
 browseable = yes
-read only = yes
+read only = no
 valid users = recshare
 guest ok = no
+force group = recshare
+create mask = 0664
+directory mask = 2775
 ```
 
 Optional in `[global]`:
@@ -253,6 +256,17 @@ Client access:
 Notes:
 - Keep Avahi enabled.
 - For reliability, avoid file transfers during recording.
+- To allow deleting files from Windows/macOS clients, set the share writable as above and fix directory permissions:
+```bash
+sudo chgrp recshare /srv/rpi_multirec/recordings
+sudo chmod 2775 /srv/rpi_multirec/recordings
+sudo systemctl restart smbd
+```
+- Existing files already created by `root` may also need:
+```bash
+sudo chgrp recshare /srv/rpi_multirec/recordings/*
+sudo chmod 664 /srv/rpi_multirec/recordings/*
+```
 
 ## Headless USB automount on Raspberry Pi OS Lite
 Raspberry Pi OS Lite does not automatically mount arbitrary USB storage by default. To let the recorder use any exFAT USB drive present at startup, provision headless automount once:
