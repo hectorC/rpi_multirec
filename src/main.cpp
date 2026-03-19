@@ -2130,7 +2130,7 @@ int main(int argc, char** argv) {
   auto next_battery_poll = std::chrono::steady_clock::now();
   const auto battery_interval = std::chrono::seconds(10);
   auto next_storage_poll = std::chrono::steady_clock::now();
-  const auto storage_interval = std::chrono::seconds(2);
+  const auto storage_interval = std::chrono::seconds(30);
   auto now_ms = []() -> int64_t {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
                std::chrono::steady_clock::now().time_since_epoch())
