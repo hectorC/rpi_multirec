@@ -71,6 +71,13 @@ std::string g_recordings_dir = kDefaultRecordingsDir;
 
 const std::string& RecordingsDir() { return g_recordings_dir; }
 
+std::string ToLowerCopy(std::string s) {
+  std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) {
+    return static_cast<char>(std::tolower(c));
+  });
+  return s;
+}
+
 void HandleSignal(int) {
   g_running.store(false);
 }
@@ -176,6 +183,99 @@ std::string DecodeMountPath(const std::string& path) {
     }
   }
   return decoded;
+}
+
+struct AlsaDeviceMatch {
+  std::string hw_device;
+  std::string mixer_card;
+};
+
+bool NameHasKeyword(const std::string& text,
+                    std::initializer_list<const char*> keywords) {
+  const std::string lower = ToLowerCopy(text);
+  for (const char* keyword : keywords) {
+    if (lower.find(keyword) != std::string::npos) {
+      return true;
+    }
+  }
+  return false;
+}
+
+std::string MixerCardFromPcmDevice(const std::string& device) {
+  const std::string needle = "CARD=";
+  const size_t card_pos = device.find(needle);
+  if (card_pos == std::string::npos) {
+    return {};
+  }
+  const size_t value_pos = card_pos + needle.size();
+  size_t end_pos = device.find(',', value_pos);
+  if (end_pos == std::string::npos) {
+    end_pos = device.size();
+  }
+  if (end_pos <= value_pos) {
+    return {};
+  }
+  return "hw:CARD=" + device.substr(value_pos, end_pos - value_pos);
+}
+
+AlsaDeviceMatch FindPreferredCaptureDevice(
+    std::initializer_list<const char*> keywords,
+    const std::string& fallback_hw_device,
+    const std::string& fallback_mixer_card = {}) {
+  AlsaDeviceMatch best{};
+  best.hw_device = fallback_hw_device;
+  best.mixer_card = fallback_mixer_card;
+
+  void** hints = nullptr;
+  const int rc = snd_device_name_hint(-1, "pcm", &hints);
+  if (rc < 0) {
+    return best;
+  }
+
+  std::string fallback_candidate;
+  for (void** it = hints; it && *it; ++it) {
+    char* name = snd_device_name_get_hint(*it, "NAME");
+    char* desc = snd_device_name_get_hint(*it, "DESC");
+    char* ioid = snd_device_name_get_hint(*it, "IOID");
+
+    const std::string name_str = name ? name : "";
+    const std::string desc_str = desc ? desc : "";
+    const std::string ioid_str = ioid ? ioid : "";
+    const bool is_input = ioid_str.empty() || ioid_str == "Input";
+    const bool matches = is_input &&
+                         (NameHasKeyword(name_str, keywords) ||
+                          NameHasKeyword(desc_str, keywords));
+
+    if (matches) {
+      if (name_str.rfind("hw:", 0) == 0) {
+        best.hw_device = name_str;
+        if (best.mixer_card.empty()) {
+          best.mixer_card = MixerCardFromPcmDevice(name_str);
+        }
+        std::free(name);
+        if (desc) std::free(desc);
+        if (ioid) std::free(ioid);
+        snd_device_name_free_hint(hints);
+        return best;
+      }
+      if (fallback_candidate.empty() && name_str.rfind("plughw:", 0) == 0) {
+        fallback_candidate = name_str;
+      }
+    }
+
+    if (name) std::free(name);
+    if (desc) std::free(desc);
+    if (ioid) std::free(ioid);
+  }
+
+  snd_device_name_free_hint(hints);
+  if (!fallback_candidate.empty()) {
+    best.hw_device = fallback_candidate;
+    if (best.mixer_card.empty()) {
+      best.mixer_card = MixerCardFromPcmDevice(fallback_candidate);
+    }
+  }
+  return best;
 }
 
 std::string DetectExternalRecordingsDir() {
@@ -292,8 +392,8 @@ void PrintUsage(const char* exe) {
       "  -h, --help              Show this help\n"
       "\n"
       "Mic presets:\n"
-      "  spcmic => device=hw:CARD=s02E5D5,DEV=0 channels=84 access=rw\n"
-      "  zylia  => device=hw:CARD=ZM13E,DEV=0   channels=19 access=mmap\n"
+      "  spcmic => device=auto-detect spacemic card channels=84 access=rw\n"
+      "  zylia  => device=auto-detect Zylia card    channels=19 access=mmap\n"
       "  Explicit --device/--channels/--access override preset values.\n"
       "\n"
       "Auto naming:\n"
@@ -455,7 +555,9 @@ bool ParseArgs(int argc, char** argv, Options* out) {
 
   if (out->mic == MicKind::kSpcmic) {
     if (!out->device_overridden) {
-      out->device = "hw:CARD=s02E5D5,DEV=0";
+      out->device = FindPreferredCaptureDevice({"spacemic"},
+                                               "hw:CARD=s02E5D5,DEV=0")
+                        .hw_device;
     }
     if (!out->channels_overridden) {
       out->channels = 84;
@@ -465,7 +567,10 @@ bool ParseArgs(int argc, char** argv, Options* out) {
     }
   } else if (out->mic == MicKind::kZylia) {
     if (!out->device_overridden) {
-      out->device = "hw:CARD=ZM13E,DEV=0";
+      out->device = FindPreferredCaptureDevice({"zylia", "zm-1", "zm1"},
+                                               "hw:CARD=ZM13E,DEV=0",
+                                               "hw:CARD=ZM13E")
+                        .hw_device;
     }
     if (!out->channels_overridden) {
       out->channels = 19;
@@ -1669,14 +1774,22 @@ int main(int argc, char** argv) {
   std::string current_device = opt.device;
   int current_channels = opt.channels;
   snd_pcm_access_t current_access = opt.access;
+  std::string zylia_mixer_card = MixerCardFromPcmDevice(current_device);
   auto ApplyMicPreset = [&](MicKind mic) {
     selected_mic = mic;
     if (mic == MicKind::kSpcmic) {
-      current_device = "hw:CARD=s02E5D5,DEV=0";
+      const AlsaDeviceMatch match =
+          FindPreferredCaptureDevice({"spacemic"}, "hw:CARD=s02E5D5,DEV=0");
+      current_device = match.hw_device;
       current_channels = 84;
       current_access = SND_PCM_ACCESS_RW_INTERLEAVED;
     } else if (mic == MicKind::kZylia) {
-      current_device = "hw:CARD=ZM13E,DEV=0";
+      const AlsaDeviceMatch match =
+          FindPreferredCaptureDevice({"zylia", "zm-1", "zm1"},
+                                     "hw:CARD=ZM13E,DEV=0",
+                                     "hw:CARD=ZM13E");
+      current_device = match.hw_device;
+      zylia_mixer_card = match.mixer_card;
       current_channels = 19;
       current_access = SND_PCM_ACCESS_MMAP_INTERLEAVED;
     }
@@ -1907,7 +2020,9 @@ int main(int argc, char** argv) {
       zylia_gain_ctl.Close();
       return;
     }
-    if (!zylia_gain_ctl.IsOpen() && !zylia_gain_ctl.Open("hw:CARD=ZM13E")) {
+    if (!zylia_gain_ctl.IsOpen() &&
+        !zylia_gain_ctl.Open(zylia_mixer_card.empty() ? "hw:CARD=ZM13E"
+                                                      : zylia_mixer_card)) {
       return;
     }
     int db = 0;
