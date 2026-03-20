@@ -37,7 +37,7 @@ This section is a first draft. Obvious major parts are listed here; additional p
 - Raspberry Pi 3 Model B+ (tested)
 - Other Raspberry Pi models may work, but are not yet documented as supported
 - MicroSD card for the OS
-- Power source suitable for stable multichannel USB recording
+- Power source suitable for stable multichannel USB recording (if not using the UPS module)
 - USB microphone:
   - `spcmic`
   - or `Zylia ZM-1`
