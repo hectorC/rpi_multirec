@@ -39,8 +39,8 @@ This section is a first draft. Obvious major parts are listed here; additional p
 - MicroSD card for the OS
 - Power source suitable for stable multichannel USB recording (if not using the UPS module)
 - USB microphone arrays:
-  - `spcmic` with latest firmware (USB Audio Class Compliant mode)
-  - and/or `Zylia ZM-1`
+  - `spcmic` with latest firmware (USB Audio Class Compliant mode) - https://spcmic.com/
+  - and/or `Zylia ZM-1` - https://www.zylia.co/zylia-zm-1-microphone.html
 - Storage target:
   - internal SD card
   - or external USB storage (exFAT supported in current workflow)
