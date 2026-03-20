@@ -72,7 +72,7 @@ The `STL/` folder contains enclosure parts that can be 3D printed for the record
 - `STL/RPi_RecorderLCDSupportL.stl`
 - `STL/RPi_RecorderLCDSupportS.stl`
 
-A later revision of this README should document which printed parts correspond to which hardware configuration and describe the assembly process.
+A later revision of this README should document which printed parts correspond to which hardware configuration and describe the assembly process. The LCD supports are for the side of the LCD module that is overhanging.
 
 ## Software dependencies
 
