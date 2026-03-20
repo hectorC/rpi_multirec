@@ -38,7 +38,7 @@ This section is a first draft. Obvious major parts are listed here; additional p
 - Other Raspberry Pi models may work, but are not yet documented as supported
 - MicroSD card for the OS
 - Power source suitable for stable multichannel USB recording (if not using the UPS module)
-- USB microphone arrays:
+- USB microphone arrays (they can be plugged in simultaneously and are user selectable, but only one can be recorded at a time):
   - `spcmic` with latest firmware (USB Audio Class Compliant mode) - https://spcmic.com/
   - and/or `Zylia ZM-1` - https://www.zylia.co/zylia-zm-1-microphone.html
 - Storage target:
