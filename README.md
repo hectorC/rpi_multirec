@@ -42,7 +42,7 @@ This section is a first draft. Obvious major parts are listed here; additional p
   - `spcmic` with latest firmware (USB Audio Class Compliant mode) - https://spcmic.com/
   - and/or `Zylia ZM-1` - https://www.zylia.co/zylia-zm-1-microphone.html
 - Storage target:
-  - internal SD card
+  - internal SD card, large capactiy and fast (UHS-I A1 U3 V30 C10)
   - or external USB storage (exFAT supported in current workflow)
 - Waveshare `1.3inch LCD HAT` - https://www.waveshare.com/1.3inch-lcd-hat.htm
 - Waveshare `UPS HAT (B)` - https://www.waveshare.com/ups-hat-b.htm
