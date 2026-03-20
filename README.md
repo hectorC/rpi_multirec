@@ -50,6 +50,16 @@ This section is a first draft. Obvious major parts are listed here; additional p
 - Waveshare `1.3inch LCD HAT`
 - Waveshare `UPS HAT (B)`
 
+### Example builds
+
+Compact version without the battery module. This version is smaller, but it needs external power such as a USB power bank:
+
+![Recorder without battery module](images/rpi_noBatteryModule.jpg)
+
+Version with the battery module installed. This version is bulkier, but it is self-contained:
+
+![Recorder with battery module](images/rpi_wBatteryModule.jpg)
+
 ### Enclosure / 3D printing
 
 The `STL/` folder contains enclosure parts that can be 3D printed for the recorder build:
