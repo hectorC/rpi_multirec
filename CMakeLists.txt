@@ -10,6 +10,7 @@ pkg_check_modules(SNDFILE REQUIRED sndfile)
 pkg_check_modules(LIBGPIOD REQUIRED IMPORTED_TARGET libgpiod)
 
 add_executable(rpi_multirec
+    src/app.cpp
     src/main.cpp
 )
 

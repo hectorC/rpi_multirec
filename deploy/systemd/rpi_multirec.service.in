@@ -1,0 +1,19 @@
+[Unit]
+Description=RPi Multi Recorder
+After=systemd-udev-settle.service sound.target
+Wants=systemd-udev-settle.service
+
+[Service]
+Type=simple
+WorkingDirectory=@REPO_DIR@
+ExecStartPre=/bin/sh -c 'for i in $(seq 1 10); do grep -Eq " exfat(|-fuse) " /proc/mounts && exit 0; sleep 1; done; exit 0'
+ExecStart=@REPO_DIR@/build/rpi_multirec @RECORDER_ARGS@
+Restart=on-failure
+RestartSec=2
+User=root
+Group=root
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
