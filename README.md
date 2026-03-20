@@ -45,10 +45,10 @@ This section is a first draft. Obvious major parts are listed here; additional p
   - internal SD card
   - or external USB storage (exFAT supported in current workflow)
 
-### Optional / currently supported add-ons
+### Additional components
 
-- Waveshare `1.3inch LCD HAT`
-- Waveshare `UPS HAT (B)`
+- Waveshare `1.3inch LCD HAT` - https://www.waveshare.com/1.3inch-lcd-hat.htm
+- Waveshare `UPS HAT (B)` - https://www.waveshare.com/ups-hat-b.htm
 
 ### Example builds
 
