@@ -14,8 +14,123 @@ namespace {
 
 std::atomic<bool> g_running{true};
 
+enum class UiMode {
+  kSpcmic,
+  kZylia,
+  kPlayback,
+};
+
+constexpr int kSpcmicPlaybackLeftChannel = 24;   // ch 25
+constexpr int kSpcmicPlaybackRightChannel = 52;  // ch 53
+constexpr int kZyliaPlaybackLeftChannel = 4;   // ch 5
+constexpr int kZyliaPlaybackRightChannel = 7;  // ch 8
+constexpr size_t kPlaybackVisibleItems = 6;
+
 void HandleSignal(int) {
   g_running.store(false);
+}
+
+UiMode NextUiMode(UiMode mode) {
+  switch (mode) {
+    case UiMode::kSpcmic:
+      return UiMode::kZylia;
+    case UiMode::kZylia:
+      return UiMode::kPlayback;
+    case UiMode::kPlayback:
+      return UiMode::kSpcmic;
+  }
+  return UiMode::kSpcmic;
+}
+
+UiMode PrevUiMode(UiMode mode) {
+  switch (mode) {
+    case UiMode::kSpcmic:
+      return UiMode::kPlayback;
+    case UiMode::kZylia:
+      return UiMode::kSpcmic;
+    case UiMode::kPlayback:
+      return UiMode::kZylia;
+  }
+  return UiMode::kSpcmic;
+}
+
+std::vector<std::string> ListPlaybackFiles() {
+  std::vector<std::string> files;
+  std::error_code ec;
+  const std::filesystem::path root(RecordingsDir());
+  if (!std::filesystem::exists(root, ec) ||
+      !std::filesystem::is_directory(root, ec)) {
+    return files;
+  }
+  for (const auto& entry : std::filesystem::directory_iterator(root, ec)) {
+    if (ec) {
+      break;
+    }
+    if (!entry.is_regular_file(ec) || ec) {
+      continue;
+    }
+    const std::string ext = ToLowerCopy(entry.path().extension().string());
+    if (ext == ".rf64") {
+      files.push_back(entry.path().string());
+    }
+  }
+  std::sort(files.begin(), files.end(), [](const std::string& a,
+                                           const std::string& b) {
+    std::error_code ec_a;
+    std::error_code ec_b;
+    const auto ta = std::filesystem::last_write_time(a, ec_a);
+    const auto tb = std::filesystem::last_write_time(b, ec_b);
+    if (!ec_a && !ec_b && ta != tb) {
+      return ta > tb;
+    }
+    return std::filesystem::path(a).filename().string() >
+           std::filesystem::path(b).filename().string();
+  });
+  return files;
+}
+
+std::string MakePlaybackDisplayName(const std::string& file_path) {
+  std::string stem = std::filesystem::path(file_path).stem().string();
+  if (stem.size() > 18) {
+    stem.resize(18);
+  }
+  return stem;
+}
+
+bool DeterminePlaybackMapping(const std::string& file_path, int file_channels,
+                              int* left_idx, int* right_idx,
+                              std::string* route_label) {
+  const std::string lower_name =
+      ToLowerCopy(std::filesystem::path(file_path).filename().string());
+  if (((lower_name.rfind("spcmic_", 0) == 0 || lower_name.rfind("spc_", 0) == 0) ||
+       file_channels == 84) &&
+      file_channels > kSpcmicPlaybackRightChannel) {
+    if (left_idx) *left_idx = kSpcmicPlaybackLeftChannel;
+    if (right_idx) *right_idx = kSpcmicPlaybackRightChannel;
+    if (route_label) *route_label = "SPCMIC CH25-53";
+    return true;
+  }
+  if (lower_name.rfind("zylia_", 0) == 0 || lower_name.rfind("zyl_", 0) == 0 ||
+      file_channels == 19) {
+    if (left_idx) *left_idx = kZyliaPlaybackLeftChannel;
+    if (right_idx) *right_idx = kZyliaPlaybackRightChannel;
+    if (route_label) *route_label = "ZYLIA CH5-8";
+    return file_channels > kZyliaPlaybackRightChannel;
+  }
+  if (file_channels == 1) {
+    if (left_idx) *left_idx = 0;
+    if (right_idx) *right_idx = 0;
+    if (route_label) *route_label = "MONO";
+    return true;
+  }
+  if (file_channels >= 2) {
+    if (left_idx) *left_idx = 0;
+    if (right_idx) *right_idx = 1;
+    if (route_label) *route_label = "CH1-2";
+    return true;
+  }
+  if (route_label) *route_label = "UNSUPPORTED";
+  return false;
 }
 
 }  // namespace
@@ -69,6 +184,8 @@ int RunApp(int argc, char** argv) {
   unsigned int actual_rate = static_cast<unsigned int>(opt.rate);
   MicKind selected_mic =
       (opt.mic == MicKind::kUnspecified) ? MicKind::kSpcmic : opt.mic;
+  UiMode current_ui_mode =
+      (selected_mic == MicKind::kZylia) ? UiMode::kZylia : UiMode::kSpcmic;
   int spcmic_rate_hz = (opt.rate == 96000) ? 96000 : 48000;
   std::string current_device = opt.device;
   int current_channels = opt.channels;
@@ -288,6 +405,11 @@ int RunApp(int argc, char** argv) {
   std::atomic<bool> rate_up_requested{false};
   std::atomic<bool> rate_down_requested{false};
   std::atomic<bool> poweroff_requested{false};
+  std::atomic<bool> playback_active{false};
+  std::atomic<bool> playback_stop_requested{false};
+  std::atomic<int> playback_gain_db{0};
+  std::atomic<uint64_t> playback_elapsed_sec{0};
+  std::atomic<uint64_t> playback_selected_duration_sec{0};
   std::atomic<int64_t> record_start_ms{0};
   std::atomic<uint64_t> finalize_elapsed_sec{0};
   std::atomic<int> peak_percent{0};
@@ -302,6 +424,12 @@ int RunApp(int argc, char** argv) {
   std::atomic<bool> using_external_storage{use_external_storage};
   ZyliaGainControl zylia_gain_ctl;
   UpsHatBMonitor ups_hat_monitor;
+  std::mutex playback_mutex;
+  std::vector<std::string> playback_files;
+  std::string playback_info = "NO FILES";
+  bool playback_info_error = true;
+  int playback_selected = 0;
+  std::thread playback_thread;
 
   uint64_t take_count = 0;
   std::string current_out_path;
@@ -339,6 +467,307 @@ int RunApp(int argc, char** argv) {
       battery_valid.store(false);
     }
   };
+  auto PrepareHeadphonePlaybackOutput = [&]() -> bool {
+    snd_mixer_t* mixer = nullptr;
+    snd_mixer_elem_t* elem = nullptr;
+    snd_mixer_selem_id_t* sid = nullptr;
+    bool ok = false;
+
+    if (snd_mixer_open(&mixer, 0) < 0) {
+      return false;
+    }
+    if (snd_mixer_attach(mixer, "hw:CARD=Headphones") < 0) {
+      goto done;
+    }
+    if (snd_mixer_selem_register(mixer, nullptr, nullptr) < 0) {
+      goto done;
+    }
+    if (snd_mixer_load(mixer) < 0) {
+      goto done;
+    }
+    if (snd_mixer_selem_id_malloc(&sid) < 0 || !sid) {
+      goto done;
+    }
+    snd_mixer_selem_id_set_index(sid, 0);
+    snd_mixer_selem_id_set_name(sid, "PCM");
+    elem = snd_mixer_find_selem(mixer, sid);
+    if (!elem) {
+      goto done;
+    }
+    if (snd_mixer_selem_has_playback_switch(elem)) {
+      if (snd_mixer_selem_set_playback_switch_all(elem, 1) < 0) {
+        goto done;
+      }
+    }
+    if (snd_mixer_selem_has_playback_volume(elem)) {
+      long min_vol = 0;
+      long max_vol = 0;
+      snd_mixer_selem_get_playback_volume_range(elem, &min_vol, &max_vol);
+      if (snd_mixer_selem_set_playback_volume_all(elem, max_vol) < 0) {
+        goto done;
+      }
+    }
+    ok = true;
+
+  done:
+    if (sid) {
+      snd_mixer_selem_id_free(sid);
+    }
+    if (mixer) {
+      snd_mixer_close(mixer);
+    }
+    return ok;
+  };
+  auto SetPlaybackInfo = [&](const std::string& info, bool is_error) {
+    std::lock_guard<std::mutex> lock(playback_mutex);
+    playback_info = info;
+    playback_info_error = is_error;
+  };
+  auto RefreshPlaybackSelectionInfo = [&]() {
+    std::string selected_path;
+    {
+      std::lock_guard<std::mutex> lock(playback_mutex);
+      if (playback_files.empty() || playback_selected < 0 ||
+          playback_selected >= static_cast<int>(playback_files.size())) {
+        playback_info = "NO FILES";
+        playback_info_error = true;
+        playback_selected_duration_sec.store(0);
+        playback_elapsed_sec.store(0);
+        return;
+      }
+      selected_path = playback_files[playback_selected];
+    }
+
+    SF_INFO info{};
+    SNDFILE* in = sf_open(selected_path.c_str(), SFM_READ, &info);
+    if (!in) {
+      playback_selected_duration_sec.store(0);
+      SetPlaybackInfo("OPEN FAILED", true);
+      return;
+    }
+    playback_selected_duration_sec.store(
+        (info.samplerate > 0 && info.frames > 0)
+            ? static_cast<uint64_t>(info.frames / info.samplerate)
+            : 0);
+    int left_idx = -1;
+    int right_idx = -1;
+    std::string route_label;
+    const bool supported =
+        DeterminePlaybackMapping(selected_path, info.channels, &left_idx,
+                                &right_idx, &route_label);
+    sf_close(in);
+    SetPlaybackInfo(route_label.empty() ? "UNSUPPORTED" : route_label,
+                    !supported);
+  };
+  auto RefreshPlaybackFiles = [&]() {
+    auto files = ListPlaybackFiles();
+    {
+      std::lock_guard<std::mutex> lock(playback_mutex);
+      playback_files = std::move(files);
+      if (playback_files.empty()) {
+        playback_selected = 0;
+        playback_info = "NO FILES";
+        playback_info_error = true;
+        playback_selected_duration_sec.store(0);
+        playback_elapsed_sec.store(0);
+      } else {
+        playback_selected = std::clamp(
+            playback_selected, 0,
+            static_cast<int>(playback_files.size()) - 1);
+      }
+    }
+    if (!playback_files.empty()) {
+      RefreshPlaybackSelectionInfo();
+    }
+  };
+  auto StopPlayback = [&]() {
+    playback_stop_requested.store(true);
+    if (playback_thread.joinable()) {
+      playback_thread.join();
+    }
+    playback_active.store(false);
+    playback_stop_requested.store(false);
+    playback_elapsed_sec.store(0);
+  };
+  auto StartPlayback = [&]() -> bool {
+    std::string selected_path;
+    {
+      std::lock_guard<std::mutex> lock(playback_mutex);
+      if (playback_files.empty() || playback_selected < 0 ||
+          playback_selected >= static_cast<int>(playback_files.size())) {
+        playback_info = "NO FILES";
+        playback_info_error = true;
+        return false;
+      }
+      selected_path = playback_files[playback_selected];
+    }
+
+    SF_INFO info{};
+    SNDFILE* probe = sf_open(selected_path.c_str(), SFM_READ, &info);
+    if (!probe) {
+      SetPlaybackInfo("OPEN FAILED", true);
+      return false;
+    }
+    playback_selected_duration_sec.store(
+        (info.samplerate > 0 && info.frames > 0)
+            ? static_cast<uint64_t>(info.frames / info.samplerate)
+            : 0);
+    int left_idx = -1;
+    int right_idx = -1;
+    std::string route_label;
+    const bool supported =
+        DeterminePlaybackMapping(selected_path, info.channels, &left_idx,
+                                &right_idx, &route_label);
+    sf_close(probe);
+    if (!supported) {
+      SetPlaybackInfo(route_label.empty() ? "UNSUPPORTED" : route_label,
+                      true);
+      return false;
+    }
+
+    StopPlayback();
+    playback_stop_requested.store(false);
+    playback_elapsed_sec.store(0);
+    SetPlaybackInfo(route_label, false);
+    playback_active.store(true);
+    playback_thread = std::thread([&, selected_path, left_idx, right_idx,
+                                   route_label]() {
+      SF_INFO sfinfo{};
+      SNDFILE* in = sf_open(selected_path.c_str(), SFM_READ, &sfinfo);
+      if (!in) {
+        SetPlaybackInfo("OPEN FAILED", true);
+        playback_active.store(false);
+        playback_elapsed_sec.store(0);
+        return;
+      }
+
+      snd_pcm_t* out_pcm = nullptr;
+      if (!PrepareHeadphonePlaybackOutput()) {
+        std::fprintf(stderr, "Warning: failed to set Headphones PCM output to 100%%/unmuted\n");
+      }
+      int err = snd_pcm_open(&out_pcm, "plughw:CARD=Headphones,DEV=0",
+                             SND_PCM_STREAM_PLAYBACK, 0);
+      if (err < 0) {
+        std::fprintf(stderr, "snd_pcm_open playback failed: %s\n",
+                     snd_strerror(err));
+        SetPlaybackInfo("PLAYBACK OPEN FAIL", true);
+        sf_close(in);
+        playback_active.store(false);
+        playback_elapsed_sec.store(0);
+        return;
+      }
+
+      snd_pcm_hw_params_t* params = nullptr;
+      snd_pcm_hw_params_malloc(&params);
+      snd_pcm_hw_params_any(out_pcm, params);
+      unsigned int play_rate = static_cast<unsigned int>(sfinfo.samplerate);
+      unsigned int period_time = 50000;
+      unsigned int buffer_time = 200000;
+      err = snd_pcm_hw_params_set_access(out_pcm, params,
+                                         SND_PCM_ACCESS_RW_INTERLEAVED);
+      if (err >= 0) err = snd_pcm_hw_params_set_format(out_pcm, params,
+                                                       SND_PCM_FORMAT_S16_LE);
+      if (err >= 0) err = snd_pcm_hw_params_set_channels(out_pcm, params, 2);
+      if (err >= 0) err = snd_pcm_hw_params_set_rate_near(out_pcm, params,
+                                                          &play_rate, nullptr);
+      if (err >= 0) err = snd_pcm_hw_params_set_period_time_near(
+          out_pcm, params, &period_time, nullptr);
+      if (err >= 0) err = snd_pcm_hw_params_set_buffer_time_near(
+          out_pcm, params, &buffer_time, nullptr);
+      if (err >= 0) err = snd_pcm_hw_params(out_pcm, params);
+      snd_pcm_hw_params_free(params);
+      if (err < 0) {
+        std::fprintf(stderr, "snd_pcm_hw_params playback failed: %s\n",
+                     snd_strerror(err));
+        SetPlaybackInfo("PLAYBACK HW FAIL", true);
+        snd_pcm_close(out_pcm);
+        sf_close(in);
+        playback_active.store(false);
+        playback_elapsed_sec.store(0);
+        return;
+      }
+
+      snd_pcm_prepare(out_pcm);
+      constexpr sf_count_t kChunkFrames = 2048;
+      std::vector<float> in_frames(static_cast<size_t>(kChunkFrames) *
+                                   static_cast<size_t>(sfinfo.channels));
+      std::vector<int16_t> out_frames(static_cast<size_t>(kChunkFrames) * 2u);
+      uint64_t frames_written_total = 0;
+      bool playback_failed = false;
+
+      while (!playback_stop_requested.load()) {
+        const sf_count_t frames_read =
+            sf_readf_float(in, in_frames.data(), kChunkFrames);
+        if (frames_read <= 0) {
+          break;
+        }
+
+        const float gain =
+            std::pow(10.0f, static_cast<float>(playback_gain_db.load()) / 20.0f);
+        for (sf_count_t frame = 0; frame < frames_read; ++frame) {
+          const size_t base = static_cast<size_t>(frame) *
+                              static_cast<size_t>(sfinfo.channels);
+          const float left =
+              in_frames[base + static_cast<size_t>(left_idx)] * gain;
+          const float right =
+              in_frames[base + static_cast<size_t>(right_idx)] * gain;
+          const float l_clamped = std::max(-1.0f, std::min(1.0f, left));
+          const float r_clamped = std::max(-1.0f, std::min(1.0f, right));
+          const int l_int = static_cast<int>(
+              l_clamped * 32767.0f + (l_clamped >= 0.0f ? 0.5f : -0.5f));
+          const int r_int = static_cast<int>(
+              r_clamped * 32767.0f + (r_clamped >= 0.0f ? 0.5f : -0.5f));
+          out_frames[static_cast<size_t>(frame) * 2] =
+              static_cast<int16_t>(std::max(-32768, std::min(32767, l_int)));
+          out_frames[static_cast<size_t>(frame) * 2 + 1] =
+              static_cast<int16_t>(std::max(-32768, std::min(32767, r_int)));
+        }
+
+        snd_pcm_sframes_t frames_left = frames_read;
+        const int16_t* out_ptr = out_frames.data();
+        while (frames_left > 0 && !playback_stop_requested.load()) {
+          snd_pcm_sframes_t wrote = snd_pcm_writei(out_pcm, out_ptr, frames_left);
+          if (wrote == -EPIPE) {
+            snd_pcm_prepare(out_pcm);
+            continue;
+          }
+          if (wrote < 0) {
+            wrote = snd_pcm_recover(out_pcm, static_cast<int>(wrote), 1);
+            if (wrote < 0) {
+              std::fprintf(stderr, "snd_pcm_writei playback failed: %s\n",
+                           snd_strerror(static_cast<int>(wrote)));
+              SetPlaybackInfo("PLAYBACK WRITE FAIL", true);
+              playback_failed = true;
+              playback_stop_requested.store(true);
+              break;
+            }
+            continue;
+          }
+          frames_left -= wrote;
+          out_ptr += wrote * 2;
+          frames_written_total += static_cast<uint64_t>(wrote);
+          playback_elapsed_sec.store(
+              frames_written_total / static_cast<uint64_t>(sfinfo.samplerate));
+        }
+      }
+
+      const bool stopped_by_user = playback_stop_requested.load();
+      if (stopped_by_user) {
+        snd_pcm_drop(out_pcm);
+      } else {
+        snd_pcm_drain(out_pcm);
+      }
+      snd_pcm_close(out_pcm);
+      sf_close(in);
+      playback_active.store(false);
+      playback_stop_requested.store(false);
+      playback_elapsed_sec.store(0);
+      if (!playback_failed && !stopped_by_user) {
+        SetPlaybackInfo(route_label, false);
+      }
+    });
+    return true;
+  };
   auto PlannedOutputPath = [&]() -> std::string {
     if (!current_out_path.empty() &&
         (recording_active.load() || finalize_in_progress.load())) {
@@ -366,12 +795,40 @@ int RunApp(int argc, char** argv) {
     remaining_storage_sec.store(free_bytes / bps);
     storage_valid.store(true);
   };
+  auto ApplyCurrentMicConfig = [&]() -> bool {
+    const bool setup_ok = SetupCapture();
+    mic_available.store(setup_ok);
+    if (!RefreshDerivedSizes()) {
+      std::fprintf(stderr, "Failed to update capture sizes in idle mode\n");
+      g_running.store(false);
+      return false;
+    }
+    bytes_per_second.store(static_cast<uint64_t>(actual_rate) *
+                           static_cast<uint64_t>(bytes_per_frame));
+    RefreshStorageRemaining();
+    RefreshZyliaGain();
+    {
+      std::lock_guard<std::mutex> lock(ring_mutex);
+      ring = RingBuffer(ring_bytes);
+    }
+    if (setup_ok) {
+      std::fprintf(stdout, "Selected: %s | %d Hz | %d ch | %s\n",
+                   MicKindToString(selected_mic), opt.rate, current_channels,
+                   AccessLabel());
+    } else {
+      std::fprintf(stdout,
+                   "Selected: %s | %d Hz (mic not connected, recording disabled)\n",
+                   MicKindToString(selected_mic), opt.rate);
+    }
+    return true;
+  };
   const std::string out_preview =
       opt.out_overridden
           ? opt.out_path
           : (RecordingsDir() + "/" +
-             MicKindToString(selected_mic) + "_YYYYMMDD_HHMMSS.rf64");
+             MicKindToFilePrefix(selected_mic) + std::string("_YYYYMMDD_HHMMSS.rf64"));
   RefreshZyliaGain();
+  RefreshPlaybackFiles();
   bytes_per_second.store(static_cast<uint64_t>(actual_rate) *
                          static_cast<uint64_t>(bytes_per_frame));
   RefreshStorageRemaining();
@@ -394,7 +851,7 @@ int RunApp(int argc, char** argv) {
                  "Format: %d ch @ %u Hz (%s) | access: %s | start: %s\n"
                   "Output file: %s\n"
                   "Ring buffer: %lu ms (~%lu MB)\n"
-                  "Press KEY2 for MON, KEY2 again for REC, KEY1 to stop, Ctrl+C to exit.\n",
+                  "LEFT/RIGHT cycle spcmic, zylia, playback | KEY2 MON/REC or play | KEY1 stop | Ctrl+C exit.\n",
                  current_device.c_str(), static_cast<unsigned long>(period_size),
                  static_cast<unsigned long>(buffer_size), current_channels,
                  actual_rate, fmt_label, AccessLabel(), start_label,
@@ -620,6 +1077,7 @@ int RunApp(int argc, char** argv) {
       std::lock_guard<std::mutex> lock(ring_mutex);
       ring.Clear();
     }
+    RefreshPlaybackFiles();
     std::fprintf(stdout, "Take stopped: %s | XRUNs: %llu | Dropped: %llu bytes\n",
                  current_out_path.c_str(),
                  static_cast<unsigned long long>(xrun_count.load()),
@@ -634,6 +1092,8 @@ int RunApp(int argc, char** argv) {
     UiSnapshot snap;
     snap.recording = recording_active.load();
     snap.monitoring = monitoring_active.load();
+    snap.playback_mode = (current_ui_mode == UiMode::kPlayback);
+    snap.playback_active = playback_active.load();
     snap.external_storage = using_external_storage.load();
     snap.finalize_pending = finalize_in_progress.load();
     snap.mic = MicKindToString(selected_mic);
@@ -649,11 +1109,35 @@ int RunApp(int argc, char** argv) {
     snap.peak_pct = peak_percent.load();
     snap.xruns = xrun_count.load();
     snap.dropped_bytes = dropped_bytes.load();
+    snap.playback_gain_db = playback_gain_db.load();
+    snap.playback_elapsed_sec = snap.playback_active
+                                    ? playback_elapsed_sec.load()
+                                    : playback_selected_duration_sec.load();
     {
       std::lock_guard<std::mutex> lock(ring_mutex);
       if (ring.capacity() > 0) {
         const size_t pct = (ring.size() * 100) / ring.capacity();
         snap.ring_fill_pct = static_cast<int>(std::min<size_t>(pct, 100));
+      }
+    }
+    {
+      std::lock_guard<std::mutex> lock(playback_mutex);
+      snap.playback_info = playback_info;
+      snap.playback_info_error = playback_info_error;
+      if (snap.playback_mode) {
+        const int total = static_cast<int>(playback_files.size());
+        if (total > 0) {
+          const int selected = std::clamp(playback_selected, 0, total - 1);
+          int start = std::max(0, selected - static_cast<int>(kPlaybackVisibleItems / 2));
+          if (start + static_cast<int>(kPlaybackVisibleItems) > total) {
+            start = std::max(0, total - static_cast<int>(kPlaybackVisibleItems));
+          }
+          const int end = std::min(total, start + static_cast<int>(kPlaybackVisibleItems));
+          for (int i = start; i < end; ++i) {
+            snap.playback_items.push_back(MakePlaybackDisplayName(playback_files[i]));
+          }
+          snap.playback_selected_index = selected - start;
+        }
       }
     }
     if (snap.recording) {
@@ -711,10 +1195,12 @@ int RunApp(int argc, char** argv) {
         if (stop_evt) {
           stop_requested.store(true);
         }
-        if (mic_left_evt && !recording_active.load() && !monitoring_active.load()) {
+        if (mic_left_evt && !recording_active.load() && !monitoring_active.load() &&
+            !playback_active.load()) {
           mic_left_requested.store(true);
         }
-        if (mic_right_evt && !recording_active.load() && !monitoring_active.load()) {
+        if (mic_right_evt && !recording_active.load() && !monitoring_active.load() &&
+            !playback_active.load()) {
           mic_right_requested.store(true);
         }
         if (rate_up_evt) {
@@ -791,38 +1277,113 @@ int RunApp(int argc, char** argv) {
 
     const bool is_rec = recording_active.load();
     const bool is_mon = monitoring_active.load();
-    joy_ud_repeat.store(selected_mic == MicKind::kZylia);
+    const bool is_play = playback_active.load();
+    joy_ud_repeat.store((current_ui_mode == UiMode::kPlayback && is_play) ||
+                        (selected_mic == MicKind::kZylia &&
+                         (current_ui_mode == UiMode::kZylia || is_mon || is_rec)));
 
     if (opt.hat_ui && !is_rec && !is_mon) {
-      bool mic_changed = false;
-      bool rate_changed = false;
-      int gain_delta = 0;
-
-      if (mic_left_requested.exchange(false) &&
-          selected_mic != MicKind::kSpcmic) {
-        ApplyMicPreset(MicKind::kSpcmic);
-        mic_changed = true;
-        if (opt.rate != spcmic_rate_hz) {
-          opt.rate = spcmic_rate_hz;
-          rate_changed = true;
-        }
-      }
-      if (mic_right_requested.exchange(false) &&
-          selected_mic != MicKind::kZylia) {
-        if (selected_mic == MicKind::kSpcmic) {
-          spcmic_rate_hz = opt.rate;
-        }
-        ApplyMicPreset(MicKind::kZylia);
-        mic_changed = true;
-        if (opt.rate != 48000) {
-          opt.rate = 48000;
-          rate_changed = true;
-        }
-      }
-
+      const bool left_evt = mic_left_requested.exchange(false);
+      const bool right_evt = mic_right_requested.exchange(false);
       const bool up_evt = rate_up_requested.exchange(false);
       const bool down_evt = rate_down_requested.exchange(false);
-      if (selected_mic == MicKind::kSpcmic) {
+
+      if (current_ui_mode == UiMode::kPlayback) {
+        if (is_play) {
+          if (stop_requested.exchange(false)) {
+            StopPlayback();
+            RefreshPlaybackSelectionInfo();
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            continue;
+          }
+          start_requested.store(false);
+          int gain_db = playback_gain_db.load();
+          if (up_evt) {
+            gain_db = std::min(80, gain_db + 1);
+          }
+          if (down_evt) {
+            gain_db = std::max(0, gain_db - 1);
+          }
+          playback_gain_db.store(gain_db);
+          std::this_thread::sleep_for(std::chrono::milliseconds(20));
+          continue;
+        }
+
+        if (left_evt || right_evt) {
+          const UiMode next_mode = left_evt ? PrevUiMode(current_ui_mode)
+                                            : NextUiMode(current_ui_mode);
+          current_ui_mode = next_mode;
+          if (next_mode == UiMode::kSpcmic || next_mode == UiMode::kZylia) {
+            selected_mic =
+                (next_mode == UiMode::kSpcmic) ? MicKind::kSpcmic : MicKind::kZylia;
+            ApplyMicPreset(selected_mic);
+            opt.rate = (selected_mic == MicKind::kSpcmic) ? spcmic_rate_hz : 48000;
+            if (!ApplyCurrentMicConfig()) {
+              break;
+            }
+          } else {
+            RefreshPlaybackFiles();
+          }
+        }
+
+        if (up_evt || down_evt) {
+          int delta = 0;
+          if (up_evt) {
+            delta -= 1;
+          }
+          if (down_evt) {
+            delta += 1;
+          }
+          if (delta != 0) {
+            {
+              std::lock_guard<std::mutex> lock(playback_mutex);
+              if (!playback_files.empty()) {
+                playback_selected = std::clamp(
+                    playback_selected + delta, 0,
+                    static_cast<int>(playback_files.size()) - 1);
+              }
+            }
+            RefreshPlaybackSelectionInfo();
+          }
+        }
+
+        if (start_requested.exchange(false)) {
+          if (!StartPlayback()) {
+            std::fprintf(stderr, "Failed to start playback\n");
+          }
+        }
+        stop_requested.store(false);
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        continue;
+      }
+
+      if (left_evt || right_evt) {
+        const UiMode next_mode = left_evt ? PrevUiMode(current_ui_mode)
+                                          : NextUiMode(current_ui_mode);
+        if (next_mode != current_ui_mode) {
+          if (selected_mic == MicKind::kSpcmic) {
+            spcmic_rate_hz = opt.rate;
+          }
+          current_ui_mode = next_mode;
+          if (current_ui_mode == UiMode::kPlayback) {
+            RefreshPlaybackFiles();
+            stop_requested.store(false);
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            continue;
+          }
+          selected_mic =
+              (current_ui_mode == UiMode::kSpcmic) ? MicKind::kSpcmic : MicKind::kZylia;
+          ApplyMicPreset(selected_mic);
+          opt.rate = (selected_mic == MicKind::kSpcmic) ? spcmic_rate_hz : 48000;
+          if (!ApplyCurrentMicConfig()) {
+            break;
+          }
+        }
+      }
+
+      bool rate_changed = false;
+      int gain_delta = 0;
+      if (current_ui_mode == UiMode::kSpcmic) {
         if (up_evt && opt.rate != 96000) {
           opt.rate = 96000;
           spcmic_rate_hz = opt.rate;
@@ -833,7 +1394,7 @@ int RunApp(int argc, char** argv) {
           spcmic_rate_hz = opt.rate;
           rate_changed = true;
         }
-      } else if (selected_mic == MicKind::kZylia) {
+      } else if (current_ui_mode == UiMode::kZylia) {
         if (up_evt) {
           gain_delta += 1;
         }
@@ -842,34 +1403,12 @@ int RunApp(int argc, char** argv) {
         }
       }
 
-      if (mic_changed || rate_changed) {
-        const bool setup_ok = SetupCapture();
-        mic_available.store(setup_ok);
-        if (!RefreshDerivedSizes()) {
-          std::fprintf(stderr, "Failed to update capture sizes in idle mode\n");
-          g_running.store(false);
+      if (rate_changed) {
+        if (!ApplyCurrentMicConfig()) {
           break;
         }
-        bytes_per_second.store(static_cast<uint64_t>(actual_rate) *
-                               static_cast<uint64_t>(bytes_per_frame));
-        RefreshStorageRemaining();
-        RefreshZyliaGain();
-        {
-          std::lock_guard<std::mutex> lock(ring_mutex);
-          ring = RingBuffer(ring_bytes);
-        }
-        if (setup_ok) {
-          std::fprintf(stdout, "Selected: %s | %d Hz | %d ch | %s\n",
-                       MicKindToString(selected_mic), opt.rate,
-                       current_channels, AccessLabel());
-        } else {
-          std::fprintf(stdout,
-                       "Selected: %s | %d Hz (mic not connected, recording "
-                       "disabled)\n",
-                       MicKindToString(selected_mic), opt.rate);
-        }
       }
-      if (selected_mic == MicKind::kZylia && gain_delta != 0 &&
+      if (current_ui_mode == UiMode::kZylia && gain_delta != 0 &&
           mic_available.load() && zylia_gain_ctl.StepDb(gain_delta)) {
         RefreshZyliaGain();
       }
@@ -1060,6 +1599,9 @@ int RunApp(int argc, char** argv) {
   }
   if (monitoring_active.load()) {
     stop_monitoring();
+  }
+  if (playback_active.load() || playback_thread.joinable()) {
+    StopPlayback();
   }
   stop_writer();
 

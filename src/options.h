@@ -43,13 +43,14 @@ void PrintUsage(const char* exe) {
       "\n"
       "Waveshare HAT controls:\n"
       "  With --hat-ui the app starts in IDLE.\n"
+      "  Joystick LEFT/RIGHT cycles spcmic -> zylia -> playback\n"
       "  KEY2 = MON from IDLE, then KEY2 again = REC\n"
-      "  KEY1 = stop (MON->IDLE or REC->stop/finalize)\n"
+      "  KEY1 = stop (MON->IDLE, REC->stop/finalize, playback->stop)\n"
       "  KEY3 short release = backlight toggle\n"
       "  KEY3 hold 5s = power off after clean shutdown\n"
-      "  Joystick LEFT/RIGHT (IDLE only) = select spcmic/zylia preset\n"
       "  SPCMIC: Joystick UP/DOWN (IDLE only) = select 96kHz/48kHz\n"
       "  ZYLIA: Joystick UP/DOWN (IDLE/MON/REC) = Master Gain +/-1 dB (hold to repeat)\n"
+      "  PLAYBACK: Joystick UP/DOWN browses files, then adjusts volume while playing\n"
       "  Zylia sample rate is fixed to 48kHz.\n",
       exe);
 }

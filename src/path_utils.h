@@ -19,7 +19,7 @@ std::string ToLowerCopy(std::string s) {
 }
 
 std::string BuildAutoOutPath(MicKind mic) {
-  const char* mic_name = MicKindToString(mic);
+  const char* mic_name = MicKindToFilePrefix(mic);
   std::time_t now = std::time(nullptr);
   std::tm tm_now{};
 #ifdef _WIN32

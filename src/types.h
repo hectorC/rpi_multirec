@@ -41,3 +41,13 @@ inline const char* MicKindToString(MicKind mic) {
   return "";
 }
 
+inline const char* MicKindToFilePrefix(MicKind mic) {
+  if (mic == MicKind::kSpcmic) {
+    return "spc";
+  }
+  if (mic == MicKind::kZylia) {
+    return "zyl";
+  }
+  return "";
+}
+

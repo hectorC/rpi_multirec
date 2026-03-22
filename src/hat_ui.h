@@ -9,6 +9,8 @@ struct UiSnapshot {
   bool recording = false;
   bool monitoring = false;
   bool external_storage = false;
+  bool playback_mode = false;
+  bool playback_active = false;
   std::string mic;
   bool mic_connected = true;
   bool battery_valid = false;
@@ -25,6 +27,12 @@ struct UiSnapshot {
   uint64_t dropped_bytes = 0;
   int ring_fill_pct = 0;
   uint64_t elapsed_sec = 0;
+  std::vector<std::string> playback_items;
+  int playback_selected_index = -1;
+  std::string playback_info;
+  bool playback_info_error = false;
+  int playback_gain_db = 0;
+  uint64_t playback_elapsed_sec = 0;
 };
 
 class WaveshareHatUi {
@@ -261,6 +269,58 @@ class WaveshareHatUi {
   bool Render(const UiSnapshot& snap) {
     Clear(kBlack);
     const int margin = 12;
+    if (snap.playback_mode) {
+      const char* state = snap.playback_active ? "PLAY" : "FILES";
+      const uint16_t state_dot = snap.playback_active ? kGreen : kDarkGray;
+      FillRect(126, 6, 16, 16, state_dot);
+      DrawText(146, 6, state, kWhite, 3);
+
+      DrawText(margin, 39, FormatHms(snap.playback_elapsed_sec),
+               snap.playback_active ? kYellow : kWhite, 4);
+
+      const int list_y = 77;
+      const int row_h = 18;
+      for (size_t i = 0; i < snap.playback_items.size(); ++i) {
+        const int y = list_y + static_cast<int>(i) * row_h;
+        const bool selected = static_cast<int>(i) == snap.playback_selected_index;
+        if (selected) {
+          FillRect(margin - 4, y - 2, kWidth - 2 * margin + 8, 16, kCyan);
+        }
+        DrawText(margin, y, snap.playback_items[i], selected ? kBlack : kWhite,
+                 2);
+      }
+
+      if (!snap.playback_info.empty()) {
+        DrawText(margin, 196, snap.playback_info,
+                 snap.playback_info_error ? kRed : kGreen, 1);
+      }
+
+      const std::string vol = "VOL " + std::to_string(snap.playback_gain_db) + "DB";
+      uint16_t vol_color = kWhite;
+      if (snap.playback_gain_db > 12) {
+        vol_color = kRed;
+      } else if (snap.playback_gain_db > 0) {
+        vol_color = kOrange;
+      }
+      DrawText(margin, 220, vol, vol_color, 2);
+
+      char bat[16];
+      if (snap.battery_valid) {
+        std::snprintf(bat, sizeof(bat), "BAT %3d%%", snap.battery_pct);
+      } else {
+        std::snprintf(bat, sizeof(bat), "BAT --%%");
+      }
+      const int bat_scale = 2;
+      const int bat_w = static_cast<int>(std::strlen(bat)) * 6 * bat_scale;
+      const int bat_x = kWidth - margin - bat_w;
+      uint16_t bat_color = kDarkGray;
+      if (snap.battery_valid) {
+        bat_color = (snap.battery_pct <= 20) ? kRed : kWhite;
+      }
+      DrawText(bat_x, 220, bat, bat_color, bat_scale);
+      return Flush();
+    }
+
     const char* state = "IDLE";
     uint16_t state_dot = kDarkGray;
     if (snap.recording) {
@@ -355,9 +415,6 @@ class WaveshareHatUi {
       }
     }
     DrawText(margin, bat_y, rem, rem_color, bat_scale);
-
-    // DrawText(margin, 184, "KEY1:STOP KEY2:REC KEY3:BL", kDarkGray, 1);
-    // DrawText(margin, 202, "L SPC R ZYL  U96 D48", kDarkGray, 1);
     return Flush();
   }
 
@@ -455,6 +512,7 @@ class WaveshareHatUi {
   static const uint8_t* Glyph(char c) {
     static const uint8_t sp[] = {0x00, 0x00, 0x00, 0x00, 0x00};
     static const uint8_t dash[] = {0x08, 0x08, 0x08, 0x08, 0x08};
+    static const uint8_t underscore[] = {0x40, 0x40, 0x40, 0x40, 0x40};
     static const uint8_t colon[] = {0x00, 0x36, 0x36, 0x00, 0x00};
     static const uint8_t dot[] = {0x00, 0x60, 0x60, 0x00, 0x00};
     static const uint8_t p0[] = {0x3E, 0x51, 0x49, 0x45, 0x3E};
@@ -486,6 +544,7 @@ class WaveshareHatUi {
     static const uint8_t s[] = {0x46, 0x49, 0x49, 0x49, 0x31};
     static const uint8_t t[] = {0x01, 0x01, 0x7F, 0x01, 0x01};
     static const uint8_t u[] = {0x3F, 0x40, 0x40, 0x40, 0x3F};
+    static const uint8_t v[] = {0x1F, 0x20, 0x40, 0x20, 0x1F};
     static const uint8_t w[] = {0x7F, 0x20, 0x18, 0x20, 0x7F};
     static const uint8_t x[] = {0x63, 0x14, 0x08, 0x14, 0x63};
     static const uint8_t y[] = {0x03, 0x04, 0x78, 0x04, 0x03};
@@ -521,6 +580,7 @@ class WaveshareHatUi {
       case 'S': return s;
       case 'T': return t;
       case 'U': return u;
+      case 'V': return v;
       case 'W': return w;
       case 'X': return x;
       case 'Y': return y;
@@ -528,6 +588,7 @@ class WaveshareHatUi {
       case ':': return colon;
       case '.': return dot;
       case '-': return dash;
+      case '_': return underscore;
       case ' ': return sp;
       default: return sp;
     }
@@ -684,6 +745,8 @@ struct UiSnapshot {
   bool recording = false;
   bool monitoring = false;
   bool external_storage = false;
+  bool playback_mode = false;
+  bool playback_active = false;
   std::string mic;
   bool mic_connected = true;
   bool battery_valid = false;
@@ -700,6 +763,12 @@ struct UiSnapshot {
   uint64_t dropped_bytes = 0;
   int ring_fill_pct = 0;
   uint64_t elapsed_sec = 0;
+  std::vector<std::string> playback_items;
+  int playback_selected_index = -1;
+  std::string playback_info;
+  bool playback_info_error = false;
+  int playback_gain_db = 0;
+  uint64_t playback_elapsed_sec = 0;
 };
 
 class WaveshareHatUi {

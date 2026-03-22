@@ -34,4 +34,5 @@
 #include <sys/ioctl.h>
 #include <sys/statvfs.h>
 #include <unistd.h>
+#include <cmath>
 #endif
