@@ -267,6 +267,14 @@ The current recommended way to retrieve files without removing storage is Samba 
 
 The repository includes Samba deployment templates under `deploy/samba/`.
 
+Access details:
+
+- Windows Explorer: `\\rpirec.local\recordings`
+- macOS Finder: `smb://rpirec.local/recordings`
+- Fallback if mDNS hostname discovery fails: use the Pi IP address instead of `rpirec.local`
+- Username: `recshare`
+- Password: blank / empty
+
 See `INSTALL.md` for the supported installation path and `DEVNOTES.md` for additional setup history.
 
 ## Zylia driver notes
