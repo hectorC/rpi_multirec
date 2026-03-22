@@ -19,6 +19,7 @@ This repository is a work in progress and intended to grow into an open software
 - Support for multiple takes in one session
 - Ring-buffered writer thread with XRUN and dropped-byte reporting
 - Optional Waveshare `1.3inch LCD HAT` UI
+- On-device file browser and stereo review playback on the LCD HAT
 - Battery readout support for Waveshare `UPS HAT (B)`
 - Automatic use of mounted exFAT external storage when present at app startup
 - Samba/Avahi workflow for retrieving files over the network
@@ -119,13 +120,13 @@ Binary output:
 If `--out` is omitted and a mic preset is selected, the app auto-generates a filename using this format:
 
 ```text
-<recordings-root>/<mic>_YYYYMMDD_HHMMSS.rf64
+<recordings-root>/<prefix>_YYYYMMDD_HHMMSS.rf64
 ```
 
 Examples:
 
-- `/srv/rpi_multirec/recordings/spcmic_20260222_143015.rf64`
-- `/srv/rpi_multirec/recordings/zylia_20260222_143045.rf64`
+- `/srv/rpi_multirec/recordings/spc_20260222_143015.rf64`
+- `/srv/rpi_multirec/recordings/zyl_20260222_143045.rf64`
 
 ### Common options
 
@@ -170,6 +171,26 @@ Current preset behavior:
 
 Explicit `--device`, `--channels`, and `--access` arguments override preset defaults.
 
+## On-device playback
+
+When the LCD HAT UI is enabled, the recorder also includes a simple on-device playback browser for reviewing takes without copying them off the Pi first.
+
+Current playback behavior:
+
+- browse `.rf64` takes from the active recordings root
+- show up to 6 files at a time, scrolling around the current selection
+- display selected-file duration while idle in the browser
+- display playback position while a file is playing
+- output stereo review playback to the Raspberry Pi headphone output
+- force the Pi `Headphones` / `PCM` mixer output on and to full volume before playback
+
+Current review channel routing:
+
+- `spcmic`: channel 25 -> left, channel 53 -> right
+- `zylia`: channel 5 -> left, channel 8 -> right
+
+Playback gain is separate from recording and is applied in software for review only.
+
 ## Recording destinations
 
 Default internal recordings root:
@@ -198,18 +219,21 @@ When started with `--hat-ui`, the recorder enters an `IDLE` state instead of rec
 
 Current control mapping:
 
-- `KEY2`: `IDLE -> MON -> REC`
-- `KEY1`: stop monitoring or stop the current take
+- `KEY2`: `IDLE -> MON -> REC`, or start playback from the file browser
+- `KEY1`: stop monitoring, stop the current take, or stop playback
 - `KEY3` short release: toggle LCD backlight
 - `KEY3` hold for 5 seconds: request clean shutdown and Pi poweroff
-- Joystick `LEFT/RIGHT` in `IDLE`: select `spcmic` / `zylia`
+- Joystick `LEFT/RIGHT` in `IDLE`: cycle `spcmic -> zylia -> playback browser`
 - Joystick `UP/DOWN` in `IDLE` with `spcmic`: change sample rate
 - Joystick `UP/DOWN` with `zylia` in `IDLE` / `MON` / `REC`: adjust Zylia gain
+- Joystick `UP/DOWN` in the playback browser: move through recorded files
+- Joystick `UP/DOWN` during playback: adjust playback gain
 
 Current UI information includes:
 
-- recorder state (`IDLE`, `MON`, `REC`)
-- elapsed take time
+- recorder state (`IDLE`, `MON`, `REC`, `FILES`, `PLAY`)
+- elapsed take time during recording
+- file duration in the playback browser and playback position while playing
 - selected mic
 - sample rate / channel count
 - peak meter
@@ -218,6 +242,7 @@ Current UI information includes:
 - battery percentage (with UPS HAT B)
 - remaining recording time based on free storage and current byte rate
 - external storage indicator
+- playback file list, selected-file route label, and playback gain readout
 
 ## Stdin raw mode
 
