@@ -181,6 +181,7 @@ Current playback behavior:
 - show up to 6 files at a time, scrolling around the current selection
 - display selected-file duration while idle in the browser
 - display playback position while a file is playing
+- hold joystick `LEFT` / `RIGHT` during playback to seek backward / forward faster
 - output stereo review playback to the Raspberry Pi headphone output
 - force the Pi `Headphones` / `PCM` mixer output on and to full volume before playback
 
@@ -227,6 +228,7 @@ Current control mapping:
 - Joystick `UP/DOWN` in `IDLE` with `spcmic`: change sample rate
 - Joystick `UP/DOWN` with `zylia` in `IDLE` / `MON` / `REC`: adjust Zylia gain
 - Joystick `UP/DOWN` in the playback browser: move through recorded files
+- Joystick `LEFT/RIGHT` during playback: seek backward / forward while held
 - Joystick `UP/DOWN` during playback: adjust playback gain
 
 Current UI information includes:

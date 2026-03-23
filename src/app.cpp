@@ -410,10 +410,12 @@ int RunApp(int argc, char** argv) {
   std::atomic<int> playback_gain_db{0};
   std::atomic<uint64_t> playback_elapsed_sec{0};
   std::atomic<uint64_t> playback_selected_duration_sec{0};
+  std::atomic<int64_t> playback_seek_seconds_pending{0};
   std::atomic<int64_t> record_start_ms{0};
   std::atomic<uint64_t> finalize_elapsed_sec{0};
   std::atomic<int> peak_percent{0};
   std::atomic<bool> joy_ud_repeat{false};
+  std::atomic<bool> joy_lr_repeat{false};
   std::atomic<bool> zylia_gain_valid{false};
   std::atomic<int> zylia_gain_db{0};
   std::atomic<bool> battery_valid{false};
@@ -587,6 +589,7 @@ int RunApp(int argc, char** argv) {
     }
     playback_active.store(false);
     playback_stop_requested.store(false);
+    playback_seek_seconds_pending.store(0);
     playback_elapsed_sec.store(0);
   };
   auto StartPlayback = [&]() -> bool {
@@ -627,6 +630,7 @@ int RunApp(int argc, char** argv) {
 
     StopPlayback();
     playback_stop_requested.store(false);
+    playback_seek_seconds_pending.store(0);
     playback_elapsed_sec.store(0);
     SetPlaybackInfo(route_label, false);
     playback_active.store(true);
@@ -696,6 +700,27 @@ int RunApp(int argc, char** argv) {
       bool playback_failed = false;
 
       while (!playback_stop_requested.load()) {
+        const int64_t seek_seconds = playback_seek_seconds_pending.exchange(0);
+        if (seek_seconds != 0) {
+          const sf_count_t current_frame = sf_seek(in, 0, SF_SEEK_CUR);
+          if (current_frame >= 0) {
+            const int64_t delta_frames =
+                seek_seconds * static_cast<int64_t>(sfinfo.samplerate);
+            const int64_t max_frame = static_cast<int64_t>(sfinfo.frames);
+            const int64_t target_frame = std::clamp(
+                static_cast<int64_t>(current_frame) + delta_frames,
+                static_cast<int64_t>(0), max_frame);
+            if (sf_seek(in, static_cast<sf_count_t>(target_frame), SF_SEEK_SET) >=
+                0) {
+              snd_pcm_drop(out_pcm);
+              snd_pcm_prepare(out_pcm);
+              frames_written_total = static_cast<uint64_t>(target_frame);
+              playback_elapsed_sec.store(
+                  frames_written_total / static_cast<uint64_t>(sfinfo.samplerate));
+            }
+          }
+        }
+
         const sf_count_t frames_read =
             sf_readf_float(in, in_frames.data(), kChunkFrames);
         if (frames_read <= 0) {
@@ -851,7 +876,7 @@ int RunApp(int argc, char** argv) {
                  "Format: %d ch @ %u Hz (%s) | access: %s | start: %s\n"
                   "Output file: %s\n"
                   "Ring buffer: %lu ms (~%lu MB)\n"
-                  "LEFT/RIGHT cycle spcmic, zylia, playback | KEY2 MON/REC or play | KEY1 stop | Ctrl+C exit.\n",
+                  "LEFT/RIGHT cycle spcmic, zylia, playback (seek while playing) | KEY2 MON/REC or play | KEY1 stop | Ctrl+C exit.\n",
                  current_device.c_str(), static_cast<unsigned long>(period_size),
                  static_cast<unsigned long>(buffer_size), current_channels,
                  actual_rate, fmt_label, AccessLabel(), start_label,
@@ -1188,19 +1213,17 @@ int RunApp(int argc, char** argv) {
         hat_ui->PollButtons(&start_evt, &stop_evt, &mic_left_evt,
                             &mic_right_evt, &rate_up_evt, &rate_down_evt,
                             &backlight_toggle_evt, &poweroff_evt,
-                            joy_ud_repeat.load());
+                            joy_ud_repeat.load(), joy_lr_repeat.load());
         if (start_evt && !finalize_in_progress.load()) {
           start_requested.store(true);
         }
         if (stop_evt) {
           stop_requested.store(true);
         }
-        if (mic_left_evt && !recording_active.load() && !monitoring_active.load() &&
-            !playback_active.load()) {
+        if (mic_left_evt && !recording_active.load() && !monitoring_active.load()) {
           mic_left_requested.store(true);
         }
-        if (mic_right_evt && !recording_active.load() && !monitoring_active.load() &&
-            !playback_active.load()) {
+        if (mic_right_evt && !recording_active.load() && !monitoring_active.load()) {
           mic_right_requested.store(true);
         }
         if (rate_up_evt) {
@@ -1281,6 +1304,7 @@ int RunApp(int argc, char** argv) {
     joy_ud_repeat.store((current_ui_mode == UiMode::kPlayback && is_play) ||
                         (selected_mic == MicKind::kZylia &&
                          (current_ui_mode == UiMode::kZylia || is_mon || is_rec)));
+    joy_lr_repeat.store(current_ui_mode == UiMode::kPlayback && is_play);
 
     if (opt.hat_ui && !is_rec && !is_mon) {
       const bool left_evt = mic_left_requested.exchange(false);
@@ -1297,6 +1321,13 @@ int RunApp(int argc, char** argv) {
             continue;
           }
           start_requested.store(false);
+          constexpr int64_t kPlaybackSeekStepSec = 5;
+          if (left_evt) {
+            playback_seek_seconds_pending.fetch_sub(kPlaybackSeekStepSec);
+          }
+          if (right_evt) {
+            playback_seek_seconds_pending.fetch_add(kPlaybackSeekStepSec);
+          }
           int gain_db = playback_gain_db.load();
           if (up_evt) {
             gain_db = std::min(80, gain_db + 1);

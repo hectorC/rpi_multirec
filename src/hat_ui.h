@@ -148,7 +148,8 @@ class WaveshareHatUi {
 
   void PollButtons(bool* start, bool* stop, bool* mic_left, bool* mic_right,
                    bool* rate_up, bool* rate_down, bool* backlight_toggle,
-                   bool* poweroff, bool repeat_ud = false) {
+                   bool* poweroff, bool repeat_ud = false,
+                   bool repeat_lr = false) {
     if (start) *start = false;
     if (stop) *stop = false;
     if (mic_left) *mic_left = false;
@@ -175,7 +176,7 @@ class WaveshareHatUi {
     auto was_pressed = [&](int idx) -> bool {
       return last_btn_[idx] != idle_btn_[idx];
     };
-    auto hold_repeat = [&](int idx, int value, bool* out) {
+    auto hold_repeat = [&](int idx, int value, bool* out, bool allow_repeat) {
       if (!out) {
         return;
       }
@@ -183,7 +184,7 @@ class WaveshareHatUi {
         if (!was_pressed(idx)) {
           *out = true;
           next_repeat_[idx] = now + std::chrono::milliseconds(350);
-        } else if (repeat_ud && now >= next_repeat_[idx]) {
+        } else if (allow_repeat && now >= next_repeat_[idx]) {
           *out = true;
           next_repeat_[idx] = now + std::chrono::milliseconds(120);
         }
@@ -214,14 +215,10 @@ class WaveshareHatUi {
       key3_press_started_ = std::chrono::steady_clock::time_point{};
       key3_poweroff_fired_ = false;
     }
-    if (mic_left && edge(5, joy_left)) {
-      *mic_left = true;
-    }
-    if (mic_right && edge(6, joy_right)) {
-      *mic_right = true;
-    }
-    hold_repeat(3, joy_up, rate_up);
-    hold_repeat(4, joy_down, rate_down);
+    hold_repeat(5, joy_left, mic_left, repeat_lr);
+    hold_repeat(6, joy_right, mic_right, repeat_lr);
+    hold_repeat(3, joy_up, rate_up, repeat_ud);
+    hold_repeat(4, joy_down, rate_down, repeat_ud);
     if (key1 >= 0) last_btn_[0] = key1;
     if (key2 >= 0) last_btn_[1] = key2;
     if (key3 >= 0) last_btn_[2] = key3;
@@ -778,8 +775,10 @@ class WaveshareHatUi {
   void Shutdown() {}
   void PollButtons(bool* start, bool* stop, bool* mic_left, bool* mic_right,
                    bool* rate_up, bool* rate_down, bool* backlight_toggle,
-                   bool* poweroff, bool repeat_ud = false) {
+                   bool* poweroff, bool repeat_ud = false,
+                   bool repeat_lr = false) {
     (void)repeat_ud;
+    (void)repeat_lr;
     if (start) *start = false;
     if (stop) *stop = false;
     if (mic_left) *mic_left = false;
