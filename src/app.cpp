@@ -175,24 +175,6 @@ void ClampManualClockState(ManualClockState* state) {
   state->second = std::clamp(state->second, 0, 59);
 }
 
-const char* ManualClockFieldLabel(int field_index) {
-  switch (field_index) {
-    case 0:
-      return "YEAR";
-    case 1:
-      return "MONTH";
-    case 2:
-      return "DAY";
-    case 3:
-      return "HOUR";
-    case 4:
-      return "MIN";
-    case 5:
-      return "SEC";
-  }
-  return "YEAR";
-}
-
 std::string FormatManualClockDate(const ManualClockState& state) {
   char buf[16];
   std::snprintf(buf, sizeof(buf), "%04d-%02d-%02d", state.year, state.month,
@@ -261,11 +243,11 @@ int RunApp(int argc, char** argv) {
       (opt.mic == MicKind::kUnspecified) ? MicKind::kSpcmic : opt.mic;
   UiMode current_ui_mode =
       (selected_mic == MicKind::kZylia) ? UiMode::kZylia : UiMode::kSpcmic;
-  UiMode settings_return_mode = current_ui_mode;
   int spcmic_rate_hz = (opt.rate == 96000) ? 96000 : 48000;
   bool manual_time_set = false;
   ManualClockState manual_clock;
   int manual_clock_field = 0;
+  bool settings_editing = false;
   std::string current_device = opt.device;
   int current_channels = opt.channels;
   snd_pcm_access_t current_access = opt.access;
@@ -1041,7 +1023,7 @@ int RunApp(int argc, char** argv) {
                  "Format: %d ch @ %u Hz (%s) | access: %s | start: %s\n"
                   "Output file: %s\n"
                   "Ring buffer: %lu ms (~%lu MB)\n"
-                  "LEFT/RIGHT cycle spcmic, zylia, playback, settings (seek while playing) | KEY2 MON/REC or play/save | KEY1 stop/exit | Ctrl+C exit.\n",
+                  "LEFT/RIGHT cycle spcmic, zylia, playback, settings (seek while playing) | KEY2 MON/REC or play/save | KEY1 stop, playback stop, or settings edit/cancel | Ctrl+C exit.\n",
                  current_device.c_str(), static_cast<unsigned long>(period_size),
                  static_cast<unsigned long>(buffer_size), current_channels,
                  actual_rate, fmt_label, AccessLabel(), start_label,
@@ -1309,7 +1291,8 @@ int RunApp(int argc, char** argv) {
                                     : playback_selected_duration_sec.load();
     snap.settings_date = FormatManualClockDate(manual_clock);
     snap.settings_time = FormatManualClockTime(manual_clock);
-    snap.settings_field = ManualClockFieldLabel(manual_clock_field);
+    snap.settings_editing = settings_editing;
+    snap.settings_field_index = manual_clock_field;
     {
       std::lock_guard<std::mutex> lock(ring_mutex);
       if (ring.capacity() > 0) {
@@ -1473,7 +1456,7 @@ int RunApp(int argc, char** argv) {
     const bool is_rec = recording_active.load();
     const bool is_mon = monitoring_active.load();
     const bool is_play = playback_active.load();
-    joy_ud_repeat.store(current_ui_mode == UiMode::kSettings ||
+    joy_ud_repeat.store((current_ui_mode == UiMode::kSettings && settings_editing) ||
                         (current_ui_mode == UiMode::kPlayback && is_play) ||
                         (selected_mic == MicKind::kZylia &&
                          (current_ui_mode == UiMode::kZylia || is_mon || is_rec)));
@@ -1486,10 +1469,43 @@ int RunApp(int argc, char** argv) {
       const bool down_evt = rate_down_requested.exchange(false);
 
       if (current_ui_mode == UiMode::kSettings) {
+        if (!settings_editing) {
+          start_requested.store(false);
+          if (stop_requested.exchange(false)) {
+            LoadManualClockFromSystem();
+            manual_clock_field = 0;
+            settings_editing = true;
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            continue;
+          }
+          if (left_evt || right_evt) {
+            if (selected_mic == MicKind::kSpcmic) {
+              spcmic_rate_hz = opt.rate;
+            }
+            const UiMode next_mode = left_evt ? PrevUiMode(current_ui_mode)
+                                              : NextUiMode(current_ui_mode);
+            current_ui_mode = next_mode;
+            if (current_ui_mode == UiMode::kPlayback) {
+              RefreshPlaybackFiles();
+              stop_requested.store(false);
+              std::this_thread::sleep_for(std::chrono::milliseconds(20));
+              continue;
+            }
+            selected_mic =
+                (current_ui_mode == UiMode::kSpcmic) ? MicKind::kSpcmic : MicKind::kZylia;
+            ApplyMicPreset(selected_mic);
+            opt.rate = (selected_mic == MicKind::kSpcmic) ? spcmic_rate_hz : 48000;
+            if (!ApplyCurrentMicConfig()) {
+              break;
+            }
+          }
+          std::this_thread::sleep_for(std::chrono::milliseconds(20));
+          continue;
+        }
         if (stop_requested.exchange(false)) {
           LoadManualClockFromSystem();
-          current_ui_mode = settings_return_mode;
-          stop_requested.store(false);
+          manual_clock_field = 0;
+          settings_editing = false;
           std::this_thread::sleep_for(std::chrono::milliseconds(20));
           continue;
         }
@@ -1508,8 +1524,9 @@ int RunApp(int argc, char** argv) {
         if (start_requested.exchange(false)) {
           std::string clock_error;
           if (ApplyManualClockToSystem(&clock_error)) {
-            current_ui_mode = settings_return_mode;
             RefreshStorageRemaining();
+            settings_editing = false;
+            manual_clock_field = 0;
             std::fprintf(stdout, "System time set to %s %s\n",
                          FormatManualClockDate(manual_clock).c_str(),
                          FormatManualClockTime(manual_clock).c_str());
@@ -1565,9 +1582,9 @@ int RunApp(int argc, char** argv) {
           } else if (next_mode == UiMode::kPlayback) {
             RefreshPlaybackFiles();
           } else if (next_mode == UiMode::kSettings) {
-            settings_return_mode = UiMode::kPlayback;
             LoadManualClockFromSystem();
             manual_clock_field = 0;
+            settings_editing = false;
           }
         }
 
@@ -1617,10 +1634,9 @@ int RunApp(int argc, char** argv) {
             continue;
           }
           if (current_ui_mode == UiMode::kSettings) {
-            settings_return_mode = selected_mic == MicKind::kZylia ? UiMode::kZylia
-                                                                   : UiMode::kSpcmic;
             LoadManualClockFromSystem();
             manual_clock_field = 0;
+            settings_editing = false;
             stop_requested.store(false);
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
             continue;
@@ -1904,3 +1920,4 @@ int RunApp(int argc, char** argv) {
   }
   return 0;
 }
+

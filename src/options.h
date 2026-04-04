@@ -48,14 +48,16 @@ void PrintUsage(const char* exe) {
       "  With --hat-ui the app starts in IDLE.\n"
       "  Joystick LEFT/RIGHT cycles spcmic -> zylia -> playback -> settings\n"
       "  KEY2 = MON from IDLE, then KEY2 again = REC\n"
-      "  KEY1 = stop (MON->IDLE, REC->stop/finalize, playback->stop, settings->exit)\n"
+      "  KEY1 = stop (MON->IDLE, REC->stop/finalize, playback->stop)\n"
       "  KEY3 short release = backlight toggle\n"
       "  KEY3 hold 5s = power off after clean shutdown\n"
       "  SPCMIC: Joystick UP/DOWN (IDLE only) = select 96kHz/48kHz\n"
       "  ZYLIA: Joystick UP/DOWN (IDLE/MON/REC) = Master Gain +/-1 dB (hold to repeat)\n"
       "  PLAYBACK: Joystick UP/DOWN browses files, then adjusts volume while playing\n"
       "  PLAYBACK: hold Joystick LEFT/RIGHT while playing to seek backward/forward\n"
-      "  SETTINGS: Joystick LEFT/RIGHT selects field, UP/DOWN changes value, KEY2 saves\n"
+      "  SETTINGS: KEY1 enters edit mode; outside edit, LEFT/RIGHT changes page\n"
+      "  SETTINGS EDIT: LEFT/RIGHT selects field, UP/DOWN changes value,\n"
+      "                 KEY1 cancels, KEY2 sets time\n"
       "  Zylia sample rate is fixed to 48kHz.\n",
       exe);
 }
@@ -256,4 +258,3 @@ bool ParseArgs(int argc, char** argv, Options* out) {
   }
   return true;
 }
-

@@ -239,9 +239,11 @@ Current control mapping:
 - Joystick `UP/DOWN` in the playback browser: move through recorded files
 - Joystick `LEFT/RIGHT` during playback: seek backward / forward while held
 - Joystick `UP/DOWN` during playback: adjust playback gain
-- In `settings`: joystick `LEFT/RIGHT` selects year/month/day/hour/minute/second
-- In `settings`: joystick `UP/DOWN` changes the selected field
-- In `settings`: `KEY2` saves the manual clock setting, `KEY1` exits without saving
+- In `settings`: joystick `LEFT/RIGHT` continues page navigation until you press `KEY1` to enter edit mode
+- In `settings` edit mode: joystick `LEFT/RIGHT` selects year/month/day/hour/minute/second
+- In `settings` edit mode: joystick `UP/DOWN` changes the selected field
+- In `settings` edit mode: `KEY1` cancels and `KEY2` saves the manual clock setting
+- In `settings` edit mode: the active field turns orange
 
 Current UI information includes:
 

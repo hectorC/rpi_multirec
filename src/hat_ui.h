@@ -36,7 +36,8 @@ struct UiSnapshot {
   uint64_t playback_elapsed_sec = 0;
   std::string settings_date;
   std::string settings_time;
-  std::string settings_field;
+  bool settings_editing = false;
+  int settings_field_index = 0;
 };
 
 class WaveshareHatUi {
@@ -274,13 +275,62 @@ class WaveshareHatUi {
       FillRect(126, 6, 16, 16, kDarkGray);
       DrawText(146, 6, "SET", kWhite, 3);
       DrawText(margin, 36, "DATE", kCyan, 2);
-      DrawText(margin, 58, snap.settings_date, kWhite, 3);
+
+      const int big_scale = 3;
+      const int big_char_w = 6 * big_scale;
+      auto draw_segment = [&](int x, int y, const std::string& seg,
+                              uint16_t color) {
+        DrawText(x, y, seg, color, big_scale);
+        return x + static_cast<int>(seg.size()) * big_char_w;
+      };
+      const std::string year = snap.settings_date.size() >= 4
+                                   ? snap.settings_date.substr(0, 4)
+                                   : "0000";
+      const std::string month = snap.settings_date.size() >= 7
+                                    ? snap.settings_date.substr(5, 2)
+                                    : "00";
+      const std::string day = snap.settings_date.size() >= 10
+                                  ? snap.settings_date.substr(8, 2)
+                                  : "00";
+      const std::string hour = snap.settings_time.size() >= 2
+                                   ? snap.settings_time.substr(0, 2)
+                                   : "00";
+      const std::string minute = snap.settings_time.size() >= 5
+                                     ? snap.settings_time.substr(3, 2)
+                                     : "00";
+      const std::string second = snap.settings_time.size() >= 8
+                                     ? snap.settings_time.substr(6, 2)
+                                     : "00";
+      auto field_color = [&](int field_index) {
+        return (snap.settings_editing && snap.settings_field_index == field_index)
+                   ? kOrange
+                   : kWhite;
+      };
+      int x = margin;
+      x = draw_segment(x, 58, year, field_color(0));
+      x = draw_segment(x, 58, "-", kWhite);
+      x = draw_segment(x, 58, month, field_color(1));
+      x = draw_segment(x, 58, "-", kWhite);
+      draw_segment(x, 58, day, field_color(2));
+
       DrawText(margin, 98, "TIME", kCyan, 2);
-      DrawText(margin, 120, snap.settings_time, kWhite, 3);
-      DrawText(margin, 164, snap.settings_field, kGreen, 2);
-      DrawText(margin, 188, "UP/DN VALUE", kWhite, 1);
-      DrawText(margin, 202, "L/R FIELD", kWhite, 1);
-      DrawText(margin, 214, "KEY2 SAVE  KEY1 EXIT", kWhite, 1);
+      x = margin;
+      x = draw_segment(x, 120, hour, field_color(3));
+      x = draw_segment(x, 120, ":", kWhite);
+      x = draw_segment(x, 120, minute, field_color(4));
+      x = draw_segment(x, 120, ":", kWhite);
+      draw_segment(x, 120, second, field_color(5));
+
+      if (snap.settings_editing) {
+        DrawText(margin, 164, "EDIT MODE", kOrange, 2);
+        DrawText(margin, 188, "L/R FIELD", kWhite, 1);
+        DrawText(margin, 202, "UP/DN VALUE", kWhite, 1);
+        DrawText(margin, 214, "KEY1 CANCEL", kWhite, 1);
+        DrawText(margin, 226, "KEY2 SET", kWhite, 1);
+      } else {
+        DrawText(margin, 164, "DATE/TIME", kGreen, 2);
+        DrawText(margin, 188, "KEY1 ENTER EDIT", kWhite, 1);
+      }
 
       char bat[16];
       if (snap.battery_valid) {
@@ -802,7 +852,8 @@ struct UiSnapshot {
   uint64_t playback_elapsed_sec = 0;
   std::string settings_date;
   std::string settings_time;
-  std::string settings_field;
+  bool settings_editing = false;
+  int settings_field_index = 0;
 };
 
 class WaveshareHatUi {
@@ -833,3 +884,5 @@ class WaveshareHatUi {
 };
 
 #endif
+
+
