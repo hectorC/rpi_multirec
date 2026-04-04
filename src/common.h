@@ -30,6 +30,7 @@
 #include <gpiod.h>
 #include <linux/i2c-dev.h>
 #include <linux/spi/spidev.h>
+#include <time.h>
 #include <sched.h>
 #include <sys/ioctl.h>
 #include <sys/statvfs.h>

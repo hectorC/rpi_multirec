@@ -18,6 +18,7 @@ enum class UiMode {
   kSpcmic,
   kZylia,
   kPlayback,
+  kSettings,
 };
 
 constexpr int kSpcmicPlaybackLeftChannel = 24;   // ch 25
@@ -37,6 +38,8 @@ UiMode NextUiMode(UiMode mode) {
     case UiMode::kZylia:
       return UiMode::kPlayback;
     case UiMode::kPlayback:
+      return UiMode::kSettings;
+    case UiMode::kSettings:
       return UiMode::kSpcmic;
   }
   return UiMode::kSpcmic;
@@ -45,11 +48,13 @@ UiMode NextUiMode(UiMode mode) {
 UiMode PrevUiMode(UiMode mode) {
   switch (mode) {
     case UiMode::kSpcmic:
-      return UiMode::kPlayback;
+      return UiMode::kSettings;
     case UiMode::kZylia:
       return UiMode::kSpcmic;
     case UiMode::kPlayback:
       return UiMode::kZylia;
+    case UiMode::kSettings:
+      return UiMode::kPlayback;
   }
   return UiMode::kSpcmic;
 }
@@ -133,6 +138,75 @@ bool DeterminePlaybackMapping(const std::string& file_path, int file_channels,
   return false;
 }
 
+struct ManualClockState {
+  int year = 2026;
+  int month = 1;
+  int day = 1;
+  int hour = 0;
+  int minute = 0;
+  int second = 0;
+};
+
+bool IsLeapYear(int year) {
+  return (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0);
+}
+
+int DaysInMonth(int year, int month) {
+  static constexpr int kDays[] = {31, 28, 31, 30, 31, 30,
+                                  31, 31, 30, 31, 30, 31};
+  if (month < 1 || month > 12) {
+    return 31;
+  }
+  if (month == 2 && IsLeapYear(year)) {
+    return 29;
+  }
+  return kDays[month - 1];
+}
+
+void ClampManualClockState(ManualClockState* state) {
+  if (!state) {
+    return;
+  }
+  state->year = std::clamp(state->year, 2000, 2099);
+  state->month = std::clamp(state->month, 1, 12);
+  state->day = std::clamp(state->day, 1, DaysInMonth(state->year, state->month));
+  state->hour = std::clamp(state->hour, 0, 23);
+  state->minute = std::clamp(state->minute, 0, 59);
+  state->second = std::clamp(state->second, 0, 59);
+}
+
+const char* ManualClockFieldLabel(int field_index) {
+  switch (field_index) {
+    case 0:
+      return "YEAR";
+    case 1:
+      return "MONTH";
+    case 2:
+      return "DAY";
+    case 3:
+      return "HOUR";
+    case 4:
+      return "MIN";
+    case 5:
+      return "SEC";
+  }
+  return "YEAR";
+}
+
+std::string FormatManualClockDate(const ManualClockState& state) {
+  char buf[16];
+  std::snprintf(buf, sizeof(buf), "%04d-%02d-%02d", state.year, state.month,
+                state.day);
+  return buf;
+}
+
+std::string FormatManualClockTime(const ManualClockState& state) {
+  char buf[16];
+  std::snprintf(buf, sizeof(buf), "%02d:%02d:%02d", state.hour, state.minute,
+                state.second);
+  return buf;
+}
+
 }  // namespace
 
 int RunApp(int argc, char** argv) {
@@ -160,6 +234,7 @@ int RunApp(int argc, char** argv) {
   const bool use_external_storage = !external_recordings_dir.empty();
   SetRecordingsDir(use_external_storage ? external_recordings_dir
                                         : kDefaultRecordingsDir);
+  uint64_t next_take_number = FindHighestExistingTakeNumber() + 1;
 
   if (!opt.out_overridden) {
     if (!opt.hat_ui && opt.mic == MicKind::kUnspecified) {
@@ -169,7 +244,7 @@ int RunApp(int argc, char** argv) {
       return 1;
     }
     if (!opt.hat_ui) {
-      opt.out_path = BuildAutoOutPath(opt.mic);
+      opt.out_path = BuildAutoOutPath(opt.mic, false, next_take_number);
     }
   } else {
     opt.out_path = EnsureRecordingsPath(opt.out_path);
@@ -186,7 +261,11 @@ int RunApp(int argc, char** argv) {
       (opt.mic == MicKind::kUnspecified) ? MicKind::kSpcmic : opt.mic;
   UiMode current_ui_mode =
       (selected_mic == MicKind::kZylia) ? UiMode::kZylia : UiMode::kSpcmic;
+  UiMode settings_return_mode = current_ui_mode;
   int spcmic_rate_hz = (opt.rate == 96000) ? 96000 : 48000;
+  bool manual_time_set = false;
+  ManualClockState manual_clock;
+  int manual_clock_field = 0;
   std::string current_device = opt.device;
   int current_channels = opt.channels;
   snd_pcm_access_t current_access = opt.access;
@@ -435,6 +514,93 @@ int RunApp(int argc, char** argv) {
 
   uint64_t take_count = 0;
   std::string current_out_path;
+
+  auto LoadManualClockFromSystem = [&]() {
+    std::time_t now = std::time(nullptr);
+    std::tm tm_now{};
+#ifdef _WIN32
+    localtime_s(&tm_now, &now);
+#else
+    localtime_r(&now, &tm_now);
+#endif
+    manual_clock.year = tm_now.tm_year + 1900;
+    manual_clock.month = tm_now.tm_mon + 1;
+    manual_clock.day = tm_now.tm_mday;
+    manual_clock.hour = tm_now.tm_hour;
+    manual_clock.minute = tm_now.tm_min;
+    manual_clock.second = tm_now.tm_sec;
+    ClampManualClockState(&manual_clock);
+  };
+
+  auto AdjustManualClockField = [&](int field, int delta) {
+    switch (field) {
+      case 0:
+        manual_clock.year = std::clamp(manual_clock.year + delta, 2000, 2099);
+        break;
+      case 1:
+        manual_clock.month += delta;
+        if (manual_clock.month < 1) manual_clock.month = 12;
+        if (manual_clock.month > 12) manual_clock.month = 1;
+        break;
+      case 2:
+        manual_clock.day += delta;
+        if (manual_clock.day < 1) {
+          manual_clock.day = DaysInMonth(manual_clock.year, manual_clock.month);
+        }
+        if (manual_clock.day > DaysInMonth(manual_clock.year, manual_clock.month)) {
+          manual_clock.day = 1;
+        }
+        break;
+      case 3:
+        manual_clock.hour = (manual_clock.hour + delta + 24) % 24;
+        break;
+      case 4:
+        manual_clock.minute = (manual_clock.minute + delta + 60) % 60;
+        break;
+      case 5:
+        manual_clock.second = (manual_clock.second + delta + 60) % 60;
+        break;
+    }
+    ClampManualClockState(&manual_clock);
+  };
+
+  auto ApplyManualClockToSystem = [&](std::string* error) -> bool {
+    ClampManualClockState(&manual_clock);
+    std::tm tm_set{};
+    tm_set.tm_year = manual_clock.year - 1900;
+    tm_set.tm_mon = manual_clock.month - 1;
+    tm_set.tm_mday = manual_clock.day;
+    tm_set.tm_hour = manual_clock.hour;
+    tm_set.tm_min = manual_clock.minute;
+    tm_set.tm_sec = manual_clock.second;
+    tm_set.tm_isdst = -1;
+    const std::time_t local_epoch = std::mktime(&tm_set);
+    if (local_epoch < 0) {
+      if (error) {
+        *error = "mktime failed";
+      }
+      return false;
+    }
+#ifdef __linux__
+    const timespec ts{local_epoch, 0};
+    if (clock_settime(CLOCK_REALTIME, &ts) != 0) {
+      if (error) {
+        *error = std::strerror(errno);
+      }
+      return false;
+    }
+    manual_time_set = true;
+    LoadManualClockFromSystem();
+    return true;
+#else
+    if (error) {
+      *error = "clock_settime not supported on this platform";
+    }
+    return false;
+#endif
+  };
+
+  LoadManualClockFromSystem();
 
   const char* fmt_label =
       (opt.format == SND_PCM_FORMAT_S16_LE) ? "S16_LE" : "S24_3LE";
@@ -804,7 +970,7 @@ int RunApp(int argc, char** argv) {
     if (opt.out_overridden) {
       return BuildManualTakePath(opt.out_path, static_cast<int>(take_count + 1));
     }
-    return BuildAutoOutPath(selected_mic);
+    return BuildAutoOutPath(selected_mic, manual_time_set, next_take_number);
   };
   auto RefreshStorageRemaining = [&]() {
     const uint64_t bps = bytes_per_second.load();
@@ -850,8 +1016,7 @@ int RunApp(int argc, char** argv) {
   const std::string out_preview =
       opt.out_overridden
           ? opt.out_path
-          : (RecordingsDir() + "/" +
-             MicKindToFilePrefix(selected_mic) + std::string("_YYYYMMDD_HHMMSS.rf64"));
+          : BuildAutoOutPath(selected_mic, manual_time_set, next_take_number);
   RefreshZyliaGain();
   RefreshPlaybackFiles();
   bytes_per_second.store(static_cast<uint64_t>(actual_rate) *
@@ -876,7 +1041,7 @@ int RunApp(int argc, char** argv) {
                  "Format: %d ch @ %u Hz (%s) | access: %s | start: %s\n"
                   "Output file: %s\n"
                   "Ring buffer: %lu ms (~%lu MB)\n"
-                  "LEFT/RIGHT cycle spcmic, zylia, playback (seek while playing) | KEY2 MON/REC or play | KEY1 stop | Ctrl+C exit.\n",
+                  "LEFT/RIGHT cycle spcmic, zylia, playback, settings (seek while playing) | KEY2 MON/REC or play/save | KEY1 stop/exit | Ctrl+C exit.\n",
                  current_device.c_str(), static_cast<unsigned long>(period_size),
                  static_cast<unsigned long>(buffer_size), current_channels,
                  actual_rate, fmt_label, AccessLabel(), start_label,
@@ -921,8 +1086,9 @@ int RunApp(int argc, char** argv) {
   auto start_writer = [&]() {
     writer_running.store(true);
     writer = std::thread([&] {
+      constexpr size_t kWriterBatchPeriods = 4;
       std::vector<uint8_t> out;
-      out.resize(period_bytes);
+      out.resize(period_bytes * kWriterBatchPeriods);
       for (;;) {
         size_t bytes = 0;
         {
@@ -1009,7 +1175,8 @@ int RunApp(int argc, char** argv) {
     } else {
       current_out_path =
           opt.out_overridden ? BuildManualTakePath(opt.out_path, take_index)
-                             : BuildAutoOutPath(selected_mic);
+                             : BuildAutoOutPath(selected_mic, manual_time_set,
+                                                next_take_number);
     }
 
     {
@@ -1068,6 +1235,7 @@ int RunApp(int argc, char** argv) {
     record_start_ms.store(now_ms());
     next_status = std::chrono::steady_clock::now();
     ++take_count;
+    ++next_take_number;
     std::fprintf(stdout, "Recording started: %s\n", current_out_path.c_str());
     return true;
   };
@@ -1118,6 +1286,7 @@ int RunApp(int argc, char** argv) {
     snap.recording = recording_active.load();
     snap.monitoring = monitoring_active.load();
     snap.playback_mode = (current_ui_mode == UiMode::kPlayback);
+    snap.settings_mode = (current_ui_mode == UiMode::kSettings);
     snap.playback_active = playback_active.load();
     snap.external_storage = using_external_storage.load();
     snap.finalize_pending = finalize_in_progress.load();
@@ -1138,6 +1307,9 @@ int RunApp(int argc, char** argv) {
     snap.playback_elapsed_sec = snap.playback_active
                                     ? playback_elapsed_sec.load()
                                     : playback_selected_duration_sec.load();
+    snap.settings_date = FormatManualClockDate(manual_clock);
+    snap.settings_time = FormatManualClockTime(manual_clock);
+    snap.settings_field = ManualClockFieldLabel(manual_clock_field);
     {
       std::lock_guard<std::mutex> lock(ring_mutex);
       if (ring.capacity() > 0) {
@@ -1301,7 +1473,8 @@ int RunApp(int argc, char** argv) {
     const bool is_rec = recording_active.load();
     const bool is_mon = monitoring_active.load();
     const bool is_play = playback_active.load();
-    joy_ud_repeat.store((current_ui_mode == UiMode::kPlayback && is_play) ||
+    joy_ud_repeat.store(current_ui_mode == UiMode::kSettings ||
+                        (current_ui_mode == UiMode::kPlayback && is_play) ||
                         (selected_mic == MicKind::kZylia &&
                          (current_ui_mode == UiMode::kZylia || is_mon || is_rec)));
     joy_lr_repeat.store(current_ui_mode == UiMode::kPlayback && is_play);
@@ -1311,6 +1484,43 @@ int RunApp(int argc, char** argv) {
       const bool right_evt = mic_right_requested.exchange(false);
       const bool up_evt = rate_up_requested.exchange(false);
       const bool down_evt = rate_down_requested.exchange(false);
+
+      if (current_ui_mode == UiMode::kSettings) {
+        if (stop_requested.exchange(false)) {
+          LoadManualClockFromSystem();
+          current_ui_mode = settings_return_mode;
+          stop_requested.store(false);
+          std::this_thread::sleep_for(std::chrono::milliseconds(20));
+          continue;
+        }
+        if (left_evt) {
+          manual_clock_field = (manual_clock_field + 5) % 6;
+        }
+        if (right_evt) {
+          manual_clock_field = (manual_clock_field + 1) % 6;
+        }
+        if (up_evt) {
+          AdjustManualClockField(manual_clock_field, 1);
+        }
+        if (down_evt) {
+          AdjustManualClockField(manual_clock_field, -1);
+        }
+        if (start_requested.exchange(false)) {
+          std::string clock_error;
+          if (ApplyManualClockToSystem(&clock_error)) {
+            current_ui_mode = settings_return_mode;
+            RefreshStorageRemaining();
+            std::fprintf(stdout, "System time set to %s %s\n",
+                         FormatManualClockDate(manual_clock).c_str(),
+                         FormatManualClockTime(manual_clock).c_str());
+          } else {
+            std::fprintf(stderr, "Failed to set system time: %s\n",
+                         clock_error.c_str());
+          }
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        continue;
+      }
 
       if (current_ui_mode == UiMode::kPlayback) {
         if (is_play) {
@@ -1352,8 +1562,12 @@ int RunApp(int argc, char** argv) {
             if (!ApplyCurrentMicConfig()) {
               break;
             }
-          } else {
+          } else if (next_mode == UiMode::kPlayback) {
             RefreshPlaybackFiles();
+          } else if (next_mode == UiMode::kSettings) {
+            settings_return_mode = UiMode::kPlayback;
+            LoadManualClockFromSystem();
+            manual_clock_field = 0;
           }
         }
 
@@ -1398,6 +1612,15 @@ int RunApp(int argc, char** argv) {
           current_ui_mode = next_mode;
           if (current_ui_mode == UiMode::kPlayback) {
             RefreshPlaybackFiles();
+            stop_requested.store(false);
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            continue;
+          }
+          if (current_ui_mode == UiMode::kSettings) {
+            settings_return_mode = selected_mic == MicKind::kZylia ? UiMode::kZylia
+                                                                   : UiMode::kSpcmic;
+            LoadManualClockFromSystem();
+            manual_clock_field = 0;
             stop_requested.store(false);
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
             continue;

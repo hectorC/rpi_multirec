@@ -18,7 +18,7 @@ std::string ToLowerCopy(std::string s) {
   return s;
 }
 
-std::string BuildAutoOutPath(MicKind mic) {
+std::string BuildTimestampOutPath(MicKind mic) {
   const char* mic_name = MicKindToFilePrefix(mic);
   std::time_t now = std::time(nullptr);
   std::tm tm_now{};
@@ -31,6 +31,20 @@ std::string BuildAutoOutPath(MicKind mic) {
   oss << RecordingsDir() << "/" << mic_name << "_"
       << std::put_time(&tm_now, "%Y%m%d_%H%M%S") << ".rf64";
   return oss.str();
+}
+
+std::string BuildTakeOutPath(MicKind mic, uint64_t take_number) {
+  const char* mic_name = MicKindToFilePrefix(mic);
+  std::ostringstream oss;
+  oss << RecordingsDir() << "/" << mic_name << "_T" << std::setfill('0')
+      << std::setw(4) << take_number << ".rf64";
+  return oss.str();
+}
+
+std::string BuildAutoOutPath(MicKind mic, bool use_timestamp,
+                             uint64_t take_number) {
+  return use_timestamp ? BuildTimestampOutPath(mic)
+                       : BuildTakeOutPath(mic, take_number);
 }
 
 std::string EnsureRecordingsPath(const std::string& path) {
@@ -152,6 +166,63 @@ std::string DetectExternalRecordingsDir() {
   }
 #endif
   return {};
+}
+
+bool TryParseTakeNumberFromPath(const std::filesystem::path& file_path,
+                                uint64_t* take_number) {
+  if (!take_number) {
+    return false;
+  }
+  const std::string lower_name = ToLowerCopy(file_path.filename().string());
+  if (!(lower_name.rfind("spc_t", 0) == 0 || lower_name.rfind("zyl_t", 0) == 0)) {
+    return false;
+  }
+  const size_t marker = lower_name.find("_t");
+  if (marker == std::string::npos) {
+    return false;
+  }
+  const size_t digits_begin = marker + 2;
+  const size_t dot = lower_name.rfind('.');
+  const size_t digits_end =
+      (dot == std::string::npos || dot <= digits_begin) ? lower_name.size() : dot;
+  if (digits_end <= digits_begin) {
+    return false;
+  }
+  uint64_t value = 0;
+  for (size_t i = digits_begin; i < digits_end; ++i) {
+    const unsigned char c = static_cast<unsigned char>(lower_name[i]);
+    if (!std::isdigit(c)) {
+      return false;
+    }
+    value = value * 10 + static_cast<uint64_t>(c - '0');
+  }
+  if (value == 0) {
+    return false;
+  }
+  *take_number = value;
+  return true;
+}
+
+uint64_t FindHighestExistingTakeNumber() {
+  std::error_code ec;
+  const std::filesystem::path root(RecordingsDir());
+  if (!std::filesystem::exists(root, ec) || !std::filesystem::is_directory(root, ec)) {
+    return 0;
+  }
+  uint64_t max_take = 0;
+  for (const auto& entry : std::filesystem::directory_iterator(root, ec)) {
+    if (ec) {
+      break;
+    }
+    if (!entry.is_regular_file(ec) || ec) {
+      continue;
+    }
+    uint64_t take_number = 0;
+    if (TryParseTakeNumberFromPath(entry.path(), &take_number)) {
+      max_take = std::max(max_take, take_number);
+    }
+  }
+  return max_take;
 }
 
 std::string BuildManualTakePath(const std::string& base_path, int take_index) {

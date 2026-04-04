@@ -117,7 +117,15 @@ Binary output:
 ./build/rpi_multirec --mic zylia
 ```
 
-If `--out` is omitted and a mic preset is selected, the app auto-generates a filename using this format:
+If `--out` is omitted and a mic preset is selected, the app auto-generates filenames like this:
+
+Without manually setting the clock in the HAT settings page for the current boot session:
+
+```text
+<recordings-root>/<prefix>_T0001.rf64
+```
+
+After manually setting date/time in the HAT settings page:
 
 ```text
 <recordings-root>/<prefix>_YYYYMMDD_HHMMSS.rf64
@@ -125,8 +133,9 @@ If `--out` is omitted and a mic preset is selected, the app auto-generates a fil
 
 Examples:
 
+- `/srv/rpi_multirec/recordings/spc_T0001.rf64`
+- `/srv/rpi_multirec/recordings/zyl_T0002.rf64`
 - `/srv/rpi_multirec/recordings/spc_20260222_143015.rf64`
-- `/srv/rpi_multirec/recordings/zyl_20260222_143045.rf64`
 
 ### Common options
 
@@ -224,16 +233,19 @@ Current control mapping:
 - `KEY1`: stop monitoring, stop the current take, or stop playback
 - `KEY3` short release: toggle LCD backlight
 - `KEY3` hold for 5 seconds: request clean shutdown and Pi poweroff
-- Joystick `LEFT/RIGHT` in `IDLE`: cycle `spcmic -> zylia -> playback browser`
+- Joystick `LEFT/RIGHT` in `IDLE`: cycle `spcmic -> zylia -> playback browser -> settings`
 - Joystick `UP/DOWN` in `IDLE` with `spcmic`: change sample rate
 - Joystick `UP/DOWN` with `zylia` in `IDLE` / `MON` / `REC`: adjust Zylia gain
 - Joystick `UP/DOWN` in the playback browser: move through recorded files
 - Joystick `LEFT/RIGHT` during playback: seek backward / forward while held
 - Joystick `UP/DOWN` during playback: adjust playback gain
+- In `settings`: joystick `LEFT/RIGHT` selects year/month/day/hour/minute/second
+- In `settings`: joystick `UP/DOWN` changes the selected field
+- In `settings`: `KEY2` saves the manual clock setting, `KEY1` exits without saving
 
 Current UI information includes:
 
-- recorder state (`IDLE`, `MON`, `REC`, `FILES`, `PLAY`)
+- recorder state (`IDLE`, `MON`, `REC`, `FILES`, `PLAY`, `SET`)
 - elapsed take time during recording
 - file duration in the playback browser and playback position while playing
 - selected mic

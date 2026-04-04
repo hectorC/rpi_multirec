@@ -10,6 +10,7 @@ struct UiSnapshot {
   bool monitoring = false;
   bool external_storage = false;
   bool playback_mode = false;
+  bool settings_mode = false;
   bool playback_active = false;
   std::string mic;
   bool mic_connected = true;
@@ -33,6 +34,9 @@ struct UiSnapshot {
   bool playback_info_error = false;
   int playback_gain_db = 0;
   uint64_t playback_elapsed_sec = 0;
+  std::string settings_date;
+  std::string settings_time;
+  std::string settings_field;
 };
 
 class WaveshareHatUi {
@@ -266,6 +270,35 @@ class WaveshareHatUi {
   bool Render(const UiSnapshot& snap) {
     Clear(kBlack);
     const int margin = 12;
+    if (snap.settings_mode) {
+      FillRect(126, 6, 16, 16, kDarkGray);
+      DrawText(146, 6, "SET", kWhite, 3);
+      DrawText(margin, 36, "DATE", kCyan, 2);
+      DrawText(margin, 58, snap.settings_date, kWhite, 3);
+      DrawText(margin, 98, "TIME", kCyan, 2);
+      DrawText(margin, 120, snap.settings_time, kWhite, 3);
+      DrawText(margin, 164, snap.settings_field, kGreen, 2);
+      DrawText(margin, 188, "UP/DN VALUE", kWhite, 1);
+      DrawText(margin, 202, "L/R FIELD", kWhite, 1);
+      DrawText(margin, 214, "KEY2 SAVE  KEY1 EXIT", kWhite, 1);
+
+      char bat[16];
+      if (snap.battery_valid) {
+        std::snprintf(bat, sizeof(bat), "BAT %3d%%", snap.battery_pct);
+      } else {
+        std::snprintf(bat, sizeof(bat), "BAT --%%");
+      }
+      const int bat_scale = 2;
+      const int bat_w = static_cast<int>(std::strlen(bat)) * 6 * bat_scale;
+      const int bat_x = kWidth - margin - bat_w;
+      uint16_t bat_color = kDarkGray;
+      if (snap.battery_valid) {
+        bat_color = (snap.battery_pct <= 20) ? kRed : kWhite;
+      }
+      DrawText(bat_x, 220, bat, bat_color, bat_scale);
+      return Flush();
+    }
+
     if (snap.playback_mode) {
       const char* state = snap.playback_active ? "PLAY" : "FILES";
       const uint16_t state_dot = snap.playback_active ? kGreen : kDarkGray;
@@ -743,6 +776,7 @@ struct UiSnapshot {
   bool monitoring = false;
   bool external_storage = false;
   bool playback_mode = false;
+  bool settings_mode = false;
   bool playback_active = false;
   std::string mic;
   bool mic_connected = true;
@@ -766,6 +800,9 @@ struct UiSnapshot {
   bool playback_info_error = false;
   int playback_gain_db = 0;
   uint64_t playback_elapsed_sec = 0;
+  std::string settings_date;
+  std::string settings_time;
+  std::string settings_field;
 };
 
 class WaveshareHatUi {

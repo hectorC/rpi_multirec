@@ -23,7 +23,7 @@ struct Options {
   bool explicit_start = true;
   bool stdin_raw = false;
   bool hat_ui = false;
-  int buffer_ms = 200;
+  int buffer_ms = 500;
   int period_ms = 50;
   int ring_ms = 20000;
   int status_ms = 0;
