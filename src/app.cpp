@@ -631,9 +631,8 @@ int RunApp(int argc, char** argv) {
   auto start_writer = [&]() {
     writer_running.store(true);
     writer = std::thread([&] {
-      constexpr size_t kWriterBatchPeriods = 4;
       std::vector<uint8_t> out;
-      out.resize(period_bytes * kWriterBatchPeriods);
+      out.resize(period_bytes);
       for (;;) {
         size_t bytes = 0;
         {
