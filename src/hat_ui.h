@@ -38,6 +38,21 @@ struct UiSnapshot {
   std::string settings_time;
   bool settings_editing = false;
   int settings_field_index = 0;
+  int settings_selected_item = 0;
+  bool settings_transfer_open = false;
+  bool settings_transfer_available = false;
+  bool settings_transfer_running = false;
+  bool settings_transfer_deleting = false;
+  bool settings_transfer_error = false;
+  bool settings_transfer_done = false;
+  bool settings_transfer_can_start = false;
+  bool settings_transfer_can_delete = false;
+  std::string settings_transfer_direction;
+  std::string settings_transfer_headline;
+  std::string settings_transfer_detail;
+  std::string settings_transfer_progress;
+  std::string settings_transfer_current_file;
+  int settings_transfer_progress_pct = 0;
 };
 
 class WaveshareHatUi {
@@ -272,83 +287,152 @@ class WaveshareHatUi {
     Clear(kBlack);
     const int margin = 12;
     if (snap.settings_mode) {
+      auto draw_battery = [&]() {
+        char bat[16];
+        if (snap.battery_valid) {
+          std::snprintf(bat, sizeof(bat), "BAT %3d%%", snap.battery_pct);
+        } else {
+          std::snprintf(bat, sizeof(bat), "BAT --%%");
+        }
+        const int bat_scale = 2;
+        const int bat_w = static_cast<int>(std::strlen(bat)) * 6 * bat_scale;
+        const int bat_x = kWidth - margin - bat_w;
+        uint16_t bat_color = kDarkGray;
+        if (snap.battery_valid) {
+          bat_color = (snap.battery_pct <= 20) ? kRed : kWhite;
+        }
+        DrawText(bat_x, 220, bat, bat_color, bat_scale);
+      };
+
       FillRect(126, 6, 16, 16, kDarkGray);
       DrawText(146, 6, "SET", kWhite, 3);
-      DrawText(margin, 36, "DATE", kCyan, 2);
+      DrawText(margin, 32, "DATE/TIME",
+               snap.settings_selected_item == 0 ? kOrange : kWhite, 2);
+      DrawText(margin, 52, "TRANSFER",
+               snap.settings_selected_item == 1 ? kOrange : kWhite, 2);
 
-      const int big_scale = 3;
-      const int big_char_w = 6 * big_scale;
-      auto draw_segment = [&](int x, int y, const std::string& seg,
-                              uint16_t color) {
-        DrawText(x, y, seg, color, big_scale);
-        return x + static_cast<int>(seg.size()) * big_char_w;
-      };
-      const std::string year = snap.settings_date.size() >= 4
-                                   ? snap.settings_date.substr(0, 4)
-                                   : "0000";
-      const std::string month = snap.settings_date.size() >= 7
-                                    ? snap.settings_date.substr(5, 2)
+      if (snap.settings_selected_item == 0) {
+        const int big_scale = 3;
+        const int big_char_w = 6 * big_scale;
+        auto draw_segment = [&](int x, int y, const std::string& seg,
+                                uint16_t color) {
+          DrawText(x, y, seg, color, big_scale);
+          return x + static_cast<int>(seg.size()) * big_char_w;
+        };
+        const std::string year = snap.settings_date.size() >= 4
+                                     ? snap.settings_date.substr(0, 4)
+                                     : "0000";
+        const std::string month = snap.settings_date.size() >= 7
+                                      ? snap.settings_date.substr(5, 2)
+                                      : "00";
+        const std::string day = snap.settings_date.size() >= 10
+                                    ? snap.settings_date.substr(8, 2)
                                     : "00";
-      const std::string day = snap.settings_date.size() >= 10
-                                  ? snap.settings_date.substr(8, 2)
-                                  : "00";
-      const std::string hour = snap.settings_time.size() >= 2
-                                   ? snap.settings_time.substr(0, 2)
-                                   : "00";
-      const std::string minute = snap.settings_time.size() >= 5
-                                     ? snap.settings_time.substr(3, 2)
+        const std::string hour = snap.settings_time.size() >= 2
+                                     ? snap.settings_time.substr(0, 2)
                                      : "00";
-      const std::string second = snap.settings_time.size() >= 8
-                                     ? snap.settings_time.substr(6, 2)
-                                     : "00";
-      auto field_color = [&](int field_index) {
-        return (snap.settings_editing && snap.settings_field_index == field_index)
-                   ? kOrange
-                   : kWhite;
-      };
-      int x = margin;
-      x = draw_segment(x, 58, year, field_color(0));
-      x = draw_segment(x, 58, "-", kWhite);
-      x = draw_segment(x, 58, month, field_color(1));
-      x = draw_segment(x, 58, "-", kWhite);
-      draw_segment(x, 58, day, field_color(2));
+        const std::string minute = snap.settings_time.size() >= 5
+                                       ? snap.settings_time.substr(3, 2)
+                                       : "00";
+        const std::string second = snap.settings_time.size() >= 8
+                                       ? snap.settings_time.substr(6, 2)
+                                       : "00";
+        auto field_color = [&](int field_index) {
+          return (snap.settings_editing && snap.settings_field_index == field_index)
+                     ? kOrange
+                     : kWhite;
+        };
+        DrawText(margin, 80, "DATE", kCyan, 2);
+        int x = margin;
+        x = draw_segment(x, 102, year, field_color(0));
+        x = draw_segment(x, 102, "-", kWhite);
+        x = draw_segment(x, 102, month, field_color(1));
+        x = draw_segment(x, 102, "-", kWhite);
+        draw_segment(x, 102, day, field_color(2));
 
-      DrawText(margin, 98, "TIME", kCyan, 2);
-      x = margin;
-      x = draw_segment(x, 120, hour, field_color(3));
-      x = draw_segment(x, 120, ":", kWhite);
-      x = draw_segment(x, 120, minute, field_color(4));
-      x = draw_segment(x, 120, ":", kWhite);
-      draw_segment(x, 120, second, field_color(5));
+        DrawText(margin, 140, "TIME", kCyan, 2);
+        x = margin;
+        x = draw_segment(x, 162, hour, field_color(3));
+        x = draw_segment(x, 162, ":", kWhite);
+        x = draw_segment(x, 162, minute, field_color(4));
+        x = draw_segment(x, 162, ":", kWhite);
+        draw_segment(x, 162, second, field_color(5));
 
-      if (snap.settings_editing) {
-        DrawText(margin, 164, "EDIT MODE", kOrange, 2);
-        DrawText(margin, 188, "L/R FIELD", kWhite, 1);
-        DrawText(margin, 202, "UP/DN VALUE", kWhite, 1);
-        DrawText(margin, 214, "KEY1 CANCEL", kWhite, 1);
-        DrawText(margin, 226, "KEY2 SET", kWhite, 1);
+        if (snap.settings_editing) {
+          DrawText(margin, 194, "L/R FIELD", kWhite, 1);
+          DrawText(margin, 206, "UP/DN VALUE", kWhite, 1);
+          DrawText(margin, 218, "K1 CAN K2 SET", kWhite, 1);
+        } else {
+          DrawText(margin, 194, "KEY1 EDIT", kWhite, 1);
+          DrawText(margin, 206, "UP/DN MENU", kWhite, 1);
+        }
       } else {
-        DrawText(margin, 164, "DATE/TIME", kGreen, 2);
-        DrawText(margin, 188, "KEY1 ENTER EDIT", kWhite, 1);
+        DrawText(margin, 84, snap.settings_transfer_direction.empty()
+                                 ? "SD -> EXT"
+                                 : snap.settings_transfer_direction,
+                 kCyan, 2);
+        DrawText(margin, 108, snap.settings_transfer_headline.empty()
+                                  ? "NO FILES"
+                                  : snap.settings_transfer_headline,
+                 snap.settings_transfer_error
+                     ? kRed
+                     : ((snap.settings_transfer_done &&
+                         !snap.settings_transfer_deleting)
+                            ? kGreen
+                            : ((snap.settings_transfer_running ||
+                                snap.settings_transfer_deleting)
+                                   ? kYellow
+                                   : kWhite)),
+                 2);
+        if (!snap.settings_transfer_detail.empty()) {
+          DrawText(margin, 132, snap.settings_transfer_detail, kWhite, 1);
+        }
+        if (!snap.settings_transfer_progress.empty()) {
+          DrawText(margin, 148, snap.settings_transfer_progress,
+                   (snap.settings_transfer_running ||
+                    snap.settings_transfer_deleting)
+                       ? kYellow
+                       : kWhite,
+                   1);
+        }
+        if (!snap.settings_transfer_current_file.empty()) {
+          DrawText(margin, 164, snap.settings_transfer_current_file, kOrange, 1);
+        }
+        if (snap.settings_transfer_running || snap.settings_transfer_deleting) {
+          const int bar_x = margin;
+          const int bar_y = 184;
+          const int bar_w = 144;
+          const int bar_h = 8;
+          FillRect(bar_x - 1, bar_y - 1, bar_w + 2, bar_h + 2, kDarkGray);
+          const int fill_w =
+              (std::max(0, std::min(100, snap.settings_transfer_progress_pct)) *
+               bar_w) /
+              100;
+          if (fill_w > 0) {
+            FillRect(bar_x, bar_y, fill_w, bar_h, kOrange);
+          }
+          if (fill_w < bar_w) {
+            FillRect(bar_x + fill_w, bar_y, bar_w - fill_w, bar_h, kBlack);
+          }
+          DrawText(margin, 206,
+                   snap.settings_transfer_deleting ? "DELETING" : "COPYING",
+                   kWhite, 1);
+        } else if (snap.settings_transfer_open) {
+          DrawText(margin, 206, "KEY1 BACK", kWhite, 1);
+          if (snap.settings_transfer_can_delete) {
+            DrawText(margin, 218, "KEY2 DEL COPIED", kWhite, 1);
+          } else if (snap.settings_transfer_can_start) {
+            DrawText(margin, 218, "KEY2 START", kWhite, 1);
+          }
+        } else {
+          DrawText(margin, 206, "KEY1 OPEN", kWhite, 1);
+          DrawText(margin, 218, "UP/DN MENU", kWhite, 1);
+        }
       }
 
-      char bat[16];
-      if (snap.battery_valid) {
-        std::snprintf(bat, sizeof(bat), "BAT %3d%%", snap.battery_pct);
-      } else {
-        std::snprintf(bat, sizeof(bat), "BAT --%%");
-      }
-      const int bat_scale = 2;
-      const int bat_w = static_cast<int>(std::strlen(bat)) * 6 * bat_scale;
-      const int bat_x = kWidth - margin - bat_w;
-      uint16_t bat_color = kDarkGray;
-      if (snap.battery_valid) {
-        bat_color = (snap.battery_pct <= 20) ? kRed : kWhite;
-      }
-      DrawText(bat_x, 220, bat, bat_color, bat_scale);
+      draw_battery();
       return Flush();
     }
-
     if (snap.playback_mode) {
       const char* state = snap.playback_active ? "PLAY" : "FILES";
       const uint16_t state_dot = snap.playback_active ? kGreen : kDarkGray;
@@ -854,6 +938,21 @@ struct UiSnapshot {
   std::string settings_time;
   bool settings_editing = false;
   int settings_field_index = 0;
+  int settings_selected_item = 0;
+  bool settings_transfer_open = false;
+  bool settings_transfer_available = false;
+  bool settings_transfer_running = false;
+  bool settings_transfer_deleting = false;
+  bool settings_transfer_error = false;
+  bool settings_transfer_done = false;
+  bool settings_transfer_can_start = false;
+  bool settings_transfer_can_delete = false;
+  std::string settings_transfer_direction;
+  std::string settings_transfer_headline;
+  std::string settings_transfer_detail;
+  std::string settings_transfer_progress;
+  std::string settings_transfer_current_file;
+  int settings_transfer_progress_pct = 0;
 };
 
 class WaveshareHatUi {

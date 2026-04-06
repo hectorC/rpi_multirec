@@ -12,6 +12,9 @@ pkg_check_modules(LIBGPIOD REQUIRED IMPORTED_TARGET libgpiod)
 add_executable(rpi_multirec
     src/app.cpp
     src/main.cpp
+    src/playback.cpp
+    src/settings.cpp
+    src/transfer.cpp
 )
 
 target_include_directories(rpi_multirec PRIVATE

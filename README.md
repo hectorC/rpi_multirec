@@ -22,6 +22,7 @@ This repository is a work in progress and intended to grow into an open software
 - On-device file browser and stereo review playback on the LCD HAT
 - Battery readout support for Waveshare `UPS HAT (B)`
 - Automatic use of mounted exFAT external storage when present at app startup
+- On-device copy between internal SD storage and external exFAT storage from the settings page
 - Samba/Avahi workflow for retrieving files over the network
 - Headless boot via `systemd`
 
@@ -107,7 +108,7 @@ Binary output:
 ### Record with an explicit ALSA device
 
 ```bash
-./build/rpi_multirec --device hw:1,0 --rate 48000 --out capture.rf64
+./build/rpi_multirec --device hw:1,0 --rate 48000 --out capture.wav
 ```
 
 ### Record with a microphone preset
@@ -122,25 +123,27 @@ If `--out` is omitted and a mic preset is selected, the app auto-generates filen
 Without manually setting the clock in the HAT settings page for the current boot session:
 
 ```text
-<recordings-root>/<prefix>_T0001.rf64
+<recordings-root>/<prefix>_T0001.wav
 ```
 
 After manually setting date/time in the HAT settings page:
 
 ```text
-<recordings-root>/<prefix>_YYYYMMDD_HHMMSS.rf64
+<recordings-root>/<prefix>_YYYYMMDD_HHMMSS.wav
 ```
 
 Examples:
 
-- `/srv/rpi_multirec/recordings/spc_T0001.rf64`
-- `/srv/rpi_multirec/recordings/zyl_T0002.rf64`
-- `/srv/rpi_multirec/recordings/spc_20260222_143015.rf64`
+- `/srv/rpi_multirec/recordings/spc_T0001.wav`
+- `/srv/rpi_multirec/recordings/zyl_T0002.wav`
+- `/srv/rpi_multirec/recordings/spc_20260222_143015.wav`
+
+The files are still written as RF64/WAV internally; the `.wav` extension is used for better DAW compatibility.
 
 ### Common options
 
 - `--device <name>` ALSA device
-- `--out <path>` output RF64 file
+- `--out <path>` output RF64/WAV file
 - `--rate 48000|96000`
 - `--channels <n>`
 - `--mic spcmic|zylia`
@@ -186,7 +189,7 @@ When the LCD HAT UI is enabled, the recorder also includes a simple on-device pl
 
 Current playback behavior:
 
-- browse `.rf64` takes from the active recordings root
+- browse `.wav` takes from the active recordings root
 - show up to 6 files at a time, scrolling around the current selection
 - display selected-file duration while idle in the browser
 - display playback position while a file is playing
@@ -223,6 +226,20 @@ Current storage behavior:
 - If `--out` is relative, it is resolved under the active recordings root.
 - If `--out` is absolute, that path is used as-is.
 
+## On-device file transfer
+
+From the `TRANSFER` item in the HAT settings page, the recorder can copy files between the internal SD recordings folder and an external exFAT drive without removing storage.
+
+Current transfer behavior:
+
+- If the recorder booted in normal internal-storage mode, transfer direction is `SD -> EXT`
+- If the recorder booted in external-storage `E` mode, transfer direction is `EXT -> SD`
+- Late-inserted exFAT drives are detected from the transfer page, even though recording destination is still chosen only at app startup
+- Files are copied into the standard destination recordings folder (`/srv/rpi_multirec/recordings` on SD, `<mount>/rpi_multirec` on external storage)
+- Existing destination files are skipped
+- After a successful transfer, `KEY2` can delete only the source files that were copied successfully or were already present at the destination with matching size
+- Source files are never deleted automatically
+
 ## Waveshare LCD HAT UI
 
 When started with `--hat-ui`, the recorder enters an `IDLE` state instead of recording immediately.
@@ -239,11 +256,13 @@ Current control mapping:
 - Joystick `UP/DOWN` in the playback browser: move through recorded files
 - Joystick `LEFT/RIGHT` during playback: seek backward / forward while held
 - Joystick `UP/DOWN` during playback: adjust playback gain
-- In `settings`: joystick `LEFT/RIGHT` continues page navigation until you press `KEY1` to enter edit mode
-- In `settings` edit mode: joystick `LEFT/RIGHT` selects year/month/day/hour/minute/second
-- In `settings` edit mode: joystick `UP/DOWN` changes the selected field
-- In `settings` edit mode: `KEY1` cancels and `KEY2` saves the manual clock setting
-- In `settings` edit mode: the active field turns orange
+- In `settings`: joystick `UP/DOWN` selects `DATE/TIME` or `TRANSFER`
+- In `settings` with `DATE/TIME` selected: `KEY1` enters edit mode, and the active field turns orange
+- In `settings` date/time edit mode: joystick `LEFT/RIGHT` selects year/month/day/hour/minute/second
+- In `settings` date/time edit mode: joystick `UP/DOWN` changes the selected field
+- In `settings` date/time edit mode: `KEY1` cancels and `KEY2` saves the manual clock setting
+- In `settings` with `TRANSFER` selected: `KEY1` opens the transfer view and `KEY2` starts the copy when available
+- After a successful transfer, `KEY2` in the transfer view deletes only the files that were copied safely
 
 Current UI information includes:
 
@@ -259,16 +278,17 @@ Current UI information includes:
 - remaining recording time based on free storage and current byte rate
 - external storage indicator
 - playback file list, selected-file route label, and playback gain readout
+- transfer direction, progress, and completion/error status in the settings page
 
 ## Stdin raw mode
 
-The app can also act as an RF64 writer for raw PCM piped in from `arecord` or another capture tool.
+The app can also act as an RF64/WAV writer for raw PCM piped in from `arecord` or another capture tool.
 
 Example:
 
 ```bash
 arecord -D hw:CARD=ZM13E,DEV=0 -f S24_3LE -c 19 -r 48000 -t raw | \
-  ./build/rpi_multirec --stdin-raw --rate 48000 --channels 19 --format s24 --out /home/pi/zm1.rf64
+  ./build/rpi_multirec --stdin-raw --rate 48000 --channels 19 --format s24 --out /home/pi/zm1.wav
 ```
 
 ## Boot and headless operation

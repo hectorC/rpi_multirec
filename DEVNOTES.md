@@ -22,12 +22,12 @@ cmake --build build -j
 ## Run
 Example (48 kHz):
 ```bash
-./build/rpi_multirec --device hw:1,0 --rate 48000 --out capture.rf64
+./build/rpi_multirec --device hw:1,0 --rate 48000 --out capture.wav
 ```
 
 Example (96 kHz, larger ring buffer):
 ```bash
-./build/rpi_multirec --device hw:1,0 --rate 96000 --ring-ms 3000 --out capture.rf64
+./build/rpi_multirec --device hw:1,0 --rate 96000 --ring-ms 3000 --out capture.wav
 ```
 
 ## Options
@@ -62,18 +62,18 @@ Explicit `--device`, `--channels`, and `--access` arguments override the preset 
 
 ## Automatic file naming
 If `--out` is not provided, the app auto-generates the filename as:
-`/srv/rpi_multirec/recordings/<mic>_YYYYMMDD_HHMMSS.rf64`
+`/srv/rpi_multirec/recordings/<mic>_YYYYMMDD_HHMMSS.wav`
 
 Examples:
-- `/srv/rpi_multirec/recordings/spcmic_20260222_143015.rf64`
-- `/srv/rpi_multirec/recordings/zylia_20260222_143045.rf64`
+- `/srv/rpi_multirec/recordings/spcmic_20260222_143015.wav`
+- `/srv/rpi_multirec/recordings/zylia_20260222_143045.wav`
 
 Auto naming requires `--mic spcmic|zylia`.
 
 Output directory behavior:
 - Default location is `/srv/rpi_multirec/recordings`.
 - If an exFAT external drive is already mounted when the app starts, the app writes to `<mount>/rpi_multirec` instead and creates that folder if needed.
-- If `--out` is relative (for example `--out take01.rf64`), it is saved under the active recordings root (`<root>/take01.rf64`).
+- If `--out` is relative (for example `--out take01.wav`), it is saved under the active recordings root (`<root>/take01.wav`).
 - If `--out` is absolute, that absolute path is used.
 - External storage detection currently happens only on app startup. Plugging a drive in later requires restarting the app.
 
@@ -97,7 +97,7 @@ Current behavior:
 - Remaining record time is shown as `HH:MM:SS` at the bottom-left and is computed from free storage and current byte rate.
 - Remaining-time text warning colors: green normally, orange below 30 minutes, red below 10 minutes, and `--:--:--` if storage query fails.
 - Multiple takes are supported in one app run.
-- With auto naming, each take gets a fresh `<mic>_YYYYMMDD_HHMMSS.rf64` file.
+- With auto naming, each take gets a fresh `<mic>_YYYYMMDD_HHMMSS.wav` file.
 - If `--out` is provided, take 1 uses that filename and take 2+ use `_takeNNN` suffixes.
 
 Linux requirements:
@@ -131,7 +131,7 @@ Recommended steps:
 Use ALSA `arecord` for capture and pipe raw PCM into the RF64 writer:
 ```bash
 arecord -D hw:CARD=ZM13E,DEV=0 -f S24_3LE -c 19 -r 48000 -t raw | \
-  ./build/rpi_multirec --stdin-raw --rate 48000 --channels 19 --format s24 --out /home/pi/zm1.rf64
+  ./build/rpi_multirec --stdin-raw --rate 48000 --channels 19 --format s24 --out /home/pi/zm1.wav
 ```
 ## Rebuild Zylia driver DKMS cleanly
 Source location: /usr/src/zm-1-driver-2.7.0/linux/src

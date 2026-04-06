@@ -4,6 +4,9 @@
 #include "audio_utils.h"
 #include "common.h"
 #include "hat_ui.h"
+#include "playback.h"
+#include "settings.h"
+#include "transfer.h"
 #include "options.h"
 #include "path_utils.h"
 #include "types.h"
@@ -21,11 +24,10 @@ enum class UiMode {
   kSettings,
 };
 
-constexpr int kSpcmicPlaybackLeftChannel = 24;   // ch 25
-constexpr int kSpcmicPlaybackRightChannel = 52;  // ch 53
-constexpr int kZyliaPlaybackLeftChannel = 4;   // ch 5
-constexpr int kZyliaPlaybackRightChannel = 7;  // ch 8
-constexpr size_t kPlaybackVisibleItems = 6;
+enum class SettingsItem {
+  kDateTime,
+  kTransfer,
+};
 
 void HandleSignal(int) {
   g_running.store(false);
@@ -59,135 +61,7 @@ UiMode PrevUiMode(UiMode mode) {
   return UiMode::kSpcmic;
 }
 
-std::vector<std::string> ListPlaybackFiles() {
-  std::vector<std::string> files;
-  std::error_code ec;
-  const std::filesystem::path root(RecordingsDir());
-  if (!std::filesystem::exists(root, ec) ||
-      !std::filesystem::is_directory(root, ec)) {
-    return files;
-  }
-  for (const auto& entry : std::filesystem::directory_iterator(root, ec)) {
-    if (ec) {
-      break;
-    }
-    if (!entry.is_regular_file(ec) || ec) {
-      continue;
-    }
-    const std::string ext = ToLowerCopy(entry.path().extension().string());
-    if (ext == ".rf64") {
-      files.push_back(entry.path().string());
-    }
-  }
-  std::sort(files.begin(), files.end(), [](const std::string& a,
-                                           const std::string& b) {
-    std::error_code ec_a;
-    std::error_code ec_b;
-    const auto ta = std::filesystem::last_write_time(a, ec_a);
-    const auto tb = std::filesystem::last_write_time(b, ec_b);
-    if (!ec_a && !ec_b && ta != tb) {
-      return ta > tb;
-    }
-    return std::filesystem::path(a).filename().string() >
-           std::filesystem::path(b).filename().string();
-  });
-  return files;
-}
 
-std::string MakePlaybackDisplayName(const std::string& file_path) {
-  std::string stem = std::filesystem::path(file_path).stem().string();
-  if (stem.size() > 18) {
-    stem.resize(18);
-  }
-  return stem;
-}
-
-bool DeterminePlaybackMapping(const std::string& file_path, int file_channels,
-                              int* left_idx, int* right_idx,
-                              std::string* route_label) {
-  const std::string lower_name =
-      ToLowerCopy(std::filesystem::path(file_path).filename().string());
-  if (((lower_name.rfind("spcmic_", 0) == 0 || lower_name.rfind("spc_", 0) == 0) ||
-       file_channels == 84) &&
-      file_channels > kSpcmicPlaybackRightChannel) {
-    if (left_idx) *left_idx = kSpcmicPlaybackLeftChannel;
-    if (right_idx) *right_idx = kSpcmicPlaybackRightChannel;
-    if (route_label) *route_label = "SPCMIC CH25-53";
-    return true;
-  }
-  if (lower_name.rfind("zylia_", 0) == 0 || lower_name.rfind("zyl_", 0) == 0 ||
-      file_channels == 19) {
-    if (left_idx) *left_idx = kZyliaPlaybackLeftChannel;
-    if (right_idx) *right_idx = kZyliaPlaybackRightChannel;
-    if (route_label) *route_label = "ZYLIA CH5-8";
-    return file_channels > kZyliaPlaybackRightChannel;
-  }
-  if (file_channels == 1) {
-    if (left_idx) *left_idx = 0;
-    if (right_idx) *right_idx = 0;
-    if (route_label) *route_label = "MONO";
-    return true;
-  }
-  if (file_channels >= 2) {
-    if (left_idx) *left_idx = 0;
-    if (right_idx) *right_idx = 1;
-    if (route_label) *route_label = "CH1-2";
-    return true;
-  }
-  if (route_label) *route_label = "UNSUPPORTED";
-  return false;
-}
-
-struct ManualClockState {
-  int year = 2026;
-  int month = 1;
-  int day = 1;
-  int hour = 0;
-  int minute = 0;
-  int second = 0;
-};
-
-bool IsLeapYear(int year) {
-  return (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0);
-}
-
-int DaysInMonth(int year, int month) {
-  static constexpr int kDays[] = {31, 28, 31, 30, 31, 30,
-                                  31, 31, 30, 31, 30, 31};
-  if (month < 1 || month > 12) {
-    return 31;
-  }
-  if (month == 2 && IsLeapYear(year)) {
-    return 29;
-  }
-  return kDays[month - 1];
-}
-
-void ClampManualClockState(ManualClockState* state) {
-  if (!state) {
-    return;
-  }
-  state->year = std::clamp(state->year, 2000, 2099);
-  state->month = std::clamp(state->month, 1, 12);
-  state->day = std::clamp(state->day, 1, DaysInMonth(state->year, state->month));
-  state->hour = std::clamp(state->hour, 0, 23);
-  state->minute = std::clamp(state->minute, 0, 59);
-  state->second = std::clamp(state->second, 0, 59);
-}
-
-std::string FormatManualClockDate(const ManualClockState& state) {
-  char buf[16];
-  std::snprintf(buf, sizeof(buf), "%04d-%02d-%02d", state.year, state.month,
-                state.day);
-  return buf;
-}
-
-std::string FormatManualClockTime(const ManualClockState& state) {
-  char buf[16];
-  std::snprintf(buf, sizeof(buf), "%02d:%02d:%02d", state.hour, state.minute,
-                state.second);
-  return buf;
-}
 
 }  // namespace
 
@@ -247,6 +121,8 @@ int RunApp(int argc, char** argv) {
   bool manual_time_set = false;
   ManualClockState manual_clock;
   int manual_clock_field = 0;
+  SettingsItem settings_item = SettingsItem::kDateTime;
+  bool transfer_open = false;
   bool settings_editing = false;
   std::string current_device = opt.device;
   int current_channels = opt.channels;
@@ -466,12 +342,7 @@ int RunApp(int argc, char** argv) {
   std::atomic<bool> rate_up_requested{false};
   std::atomic<bool> rate_down_requested{false};
   std::atomic<bool> poweroff_requested{false};
-  std::atomic<bool> playback_active{false};
-  std::atomic<bool> playback_stop_requested{false};
-  std::atomic<int> playback_gain_db{0};
-  std::atomic<uint64_t> playback_elapsed_sec{0};
-  std::atomic<uint64_t> playback_selected_duration_sec{0};
-  std::atomic<int64_t> playback_seek_seconds_pending{0};
+  PlaybackSession playback;
   std::atomic<int64_t> record_start_ms{0};
   std::atomic<uint64_t> finalize_elapsed_sec{0};
   std::atomic<int> peak_percent{0};
@@ -487,12 +358,7 @@ int RunApp(int argc, char** argv) {
   std::atomic<bool> using_external_storage{use_external_storage};
   ZyliaGainControl zylia_gain_ctl;
   UpsHatBMonitor ups_hat_monitor;
-  std::mutex playback_mutex;
-  std::vector<std::string> playback_files;
-  std::string playback_info = "NO FILES";
-  bool playback_info_error = true;
-  int playback_selected = 0;
-  std::thread playback_thread;
+  TransferSession transfer;
 
   uint64_t take_count = 0;
   std::string current_out_path;
@@ -617,329 +483,24 @@ int RunApp(int argc, char** argv) {
       battery_valid.store(false);
     }
   };
-  auto PrepareHeadphonePlaybackOutput = [&]() -> bool {
-    snd_mixer_t* mixer = nullptr;
-    snd_mixer_elem_t* elem = nullptr;
-    snd_mixer_selem_id_t* sid = nullptr;
-    bool ok = false;
-
-    if (snd_mixer_open(&mixer, 0) < 0) {
-      return false;
-    }
-    if (snd_mixer_attach(mixer, "hw:CARD=Headphones") < 0) {
-      goto done;
-    }
-    if (snd_mixer_selem_register(mixer, nullptr, nullptr) < 0) {
-      goto done;
-    }
-    if (snd_mixer_load(mixer) < 0) {
-      goto done;
-    }
-    if (snd_mixer_selem_id_malloc(&sid) < 0 || !sid) {
-      goto done;
-    }
-    snd_mixer_selem_id_set_index(sid, 0);
-    snd_mixer_selem_id_set_name(sid, "PCM");
-    elem = snd_mixer_find_selem(mixer, sid);
-    if (!elem) {
-      goto done;
-    }
-    if (snd_mixer_selem_has_playback_switch(elem)) {
-      if (snd_mixer_selem_set_playback_switch_all(elem, 1) < 0) {
-        goto done;
-      }
-    }
-    if (snd_mixer_selem_has_playback_volume(elem)) {
-      long min_vol = 0;
-      long max_vol = 0;
-      snd_mixer_selem_get_playback_volume_range(elem, &min_vol, &max_vol);
-      if (snd_mixer_selem_set_playback_volume_all(elem, max_vol) < 0) {
-        goto done;
-      }
-    }
-    ok = true;
-
-  done:
-    if (sid) {
-      snd_mixer_selem_id_free(sid);
-    }
-    if (mixer) {
-      snd_mixer_close(mixer);
-    }
-    return ok;
-  };
-  auto SetPlaybackInfo = [&](const std::string& info, bool is_error) {
-    std::lock_guard<std::mutex> lock(playback_mutex);
-    playback_info = info;
-    playback_info_error = is_error;
+  auto RefreshPlaybackFiles = [&]() {
+    ::RefreshPlaybackFiles(playback, RecordingsDir());
   };
   auto RefreshPlaybackSelectionInfo = [&]() {
-    std::string selected_path;
-    {
-      std::lock_guard<std::mutex> lock(playback_mutex);
-      if (playback_files.empty() || playback_selected < 0 ||
-          playback_selected >= static_cast<int>(playback_files.size())) {
-        playback_info = "NO FILES";
-        playback_info_error = true;
-        playback_selected_duration_sec.store(0);
-        playback_elapsed_sec.store(0);
-        return;
-      }
-      selected_path = playback_files[playback_selected];
-    }
-
-    SF_INFO info{};
-    SNDFILE* in = sf_open(selected_path.c_str(), SFM_READ, &info);
-    if (!in) {
-      playback_selected_duration_sec.store(0);
-      SetPlaybackInfo("OPEN FAILED", true);
-      return;
-    }
-    playback_selected_duration_sec.store(
-        (info.samplerate > 0 && info.frames > 0)
-            ? static_cast<uint64_t>(info.frames / info.samplerate)
-            : 0);
-    int left_idx = -1;
-    int right_idx = -1;
-    std::string route_label;
-    const bool supported =
-        DeterminePlaybackMapping(selected_path, info.channels, &left_idx,
-                                &right_idx, &route_label);
-    sf_close(in);
-    SetPlaybackInfo(route_label.empty() ? "UNSUPPORTED" : route_label,
-                    !supported);
+    ::RefreshPlaybackSelectionInfo(playback);
   };
-  auto RefreshPlaybackFiles = [&]() {
-    auto files = ListPlaybackFiles();
-    {
-      std::lock_guard<std::mutex> lock(playback_mutex);
-      playback_files = std::move(files);
-      if (playback_files.empty()) {
-        playback_selected = 0;
-        playback_info = "NO FILES";
-        playback_info_error = true;
-        playback_selected_duration_sec.store(0);
-        playback_elapsed_sec.store(0);
-      } else {
-        playback_selected = std::clamp(
-            playback_selected, 0,
-            static_cast<int>(playback_files.size()) - 1);
-      }
-    }
-    if (!playback_files.empty()) {
-      RefreshPlaybackSelectionInfo();
-    }
+  auto JoinTransferThreadIfDone = [&]() {
+    ::JoinTransferThreadIfDone(transfer);
+  };
+  auto RefreshTransferState = [&]() {
+    ::RefreshTransferState(transfer, using_external_storage.load(),
+                           RecordingsDir());
   };
   auto StopPlayback = [&]() {
-    playback_stop_requested.store(true);
-    if (playback_thread.joinable()) {
-      playback_thread.join();
-    }
-    playback_active.store(false);
-    playback_stop_requested.store(false);
-    playback_seek_seconds_pending.store(0);
-    playback_elapsed_sec.store(0);
+    ::StopPlayback(playback);
   };
   auto StartPlayback = [&]() -> bool {
-    std::string selected_path;
-    {
-      std::lock_guard<std::mutex> lock(playback_mutex);
-      if (playback_files.empty() || playback_selected < 0 ||
-          playback_selected >= static_cast<int>(playback_files.size())) {
-        playback_info = "NO FILES";
-        playback_info_error = true;
-        return false;
-      }
-      selected_path = playback_files[playback_selected];
-    }
-
-    SF_INFO info{};
-    SNDFILE* probe = sf_open(selected_path.c_str(), SFM_READ, &info);
-    if (!probe) {
-      SetPlaybackInfo("OPEN FAILED", true);
-      return false;
-    }
-    playback_selected_duration_sec.store(
-        (info.samplerate > 0 && info.frames > 0)
-            ? static_cast<uint64_t>(info.frames / info.samplerate)
-            : 0);
-    int left_idx = -1;
-    int right_idx = -1;
-    std::string route_label;
-    const bool supported =
-        DeterminePlaybackMapping(selected_path, info.channels, &left_idx,
-                                &right_idx, &route_label);
-    sf_close(probe);
-    if (!supported) {
-      SetPlaybackInfo(route_label.empty() ? "UNSUPPORTED" : route_label,
-                      true);
-      return false;
-    }
-
-    StopPlayback();
-    playback_stop_requested.store(false);
-    playback_seek_seconds_pending.store(0);
-    playback_elapsed_sec.store(0);
-    SetPlaybackInfo(route_label, false);
-    playback_active.store(true);
-    playback_thread = std::thread([&, selected_path, left_idx, right_idx,
-                                   route_label]() {
-      SF_INFO sfinfo{};
-      SNDFILE* in = sf_open(selected_path.c_str(), SFM_READ, &sfinfo);
-      if (!in) {
-        SetPlaybackInfo("OPEN FAILED", true);
-        playback_active.store(false);
-        playback_elapsed_sec.store(0);
-        return;
-      }
-
-      snd_pcm_t* out_pcm = nullptr;
-      if (!PrepareHeadphonePlaybackOutput()) {
-        std::fprintf(stderr, "Warning: failed to set Headphones PCM output to 100%%/unmuted\n");
-      }
-      int err = snd_pcm_open(&out_pcm, "plughw:CARD=Headphones,DEV=0",
-                             SND_PCM_STREAM_PLAYBACK, 0);
-      if (err < 0) {
-        std::fprintf(stderr, "snd_pcm_open playback failed: %s\n",
-                     snd_strerror(err));
-        SetPlaybackInfo("PLAYBACK OPEN FAIL", true);
-        sf_close(in);
-        playback_active.store(false);
-        playback_elapsed_sec.store(0);
-        return;
-      }
-
-      snd_pcm_hw_params_t* params = nullptr;
-      snd_pcm_hw_params_malloc(&params);
-      snd_pcm_hw_params_any(out_pcm, params);
-      unsigned int play_rate = static_cast<unsigned int>(sfinfo.samplerate);
-      unsigned int period_time = 50000;
-      unsigned int buffer_time = 200000;
-      err = snd_pcm_hw_params_set_access(out_pcm, params,
-                                         SND_PCM_ACCESS_RW_INTERLEAVED);
-      if (err >= 0) err = snd_pcm_hw_params_set_format(out_pcm, params,
-                                                       SND_PCM_FORMAT_S16_LE);
-      if (err >= 0) err = snd_pcm_hw_params_set_channels(out_pcm, params, 2);
-      if (err >= 0) err = snd_pcm_hw_params_set_rate_near(out_pcm, params,
-                                                          &play_rate, nullptr);
-      if (err >= 0) err = snd_pcm_hw_params_set_period_time_near(
-          out_pcm, params, &period_time, nullptr);
-      if (err >= 0) err = snd_pcm_hw_params_set_buffer_time_near(
-          out_pcm, params, &buffer_time, nullptr);
-      if (err >= 0) err = snd_pcm_hw_params(out_pcm, params);
-      snd_pcm_hw_params_free(params);
-      if (err < 0) {
-        std::fprintf(stderr, "snd_pcm_hw_params playback failed: %s\n",
-                     snd_strerror(err));
-        SetPlaybackInfo("PLAYBACK HW FAIL", true);
-        snd_pcm_close(out_pcm);
-        sf_close(in);
-        playback_active.store(false);
-        playback_elapsed_sec.store(0);
-        return;
-      }
-
-      snd_pcm_prepare(out_pcm);
-      constexpr sf_count_t kChunkFrames = 2048;
-      std::vector<float> in_frames(static_cast<size_t>(kChunkFrames) *
-                                   static_cast<size_t>(sfinfo.channels));
-      std::vector<int16_t> out_frames(static_cast<size_t>(kChunkFrames) * 2u);
-      uint64_t frames_written_total = 0;
-      bool playback_failed = false;
-
-      while (!playback_stop_requested.load()) {
-        const int64_t seek_seconds = playback_seek_seconds_pending.exchange(0);
-        if (seek_seconds != 0) {
-          const sf_count_t current_frame = sf_seek(in, 0, SF_SEEK_CUR);
-          if (current_frame >= 0) {
-            const int64_t delta_frames =
-                seek_seconds * static_cast<int64_t>(sfinfo.samplerate);
-            const int64_t max_frame = static_cast<int64_t>(sfinfo.frames);
-            const int64_t target_frame = std::clamp(
-                static_cast<int64_t>(current_frame) + delta_frames,
-                static_cast<int64_t>(0), max_frame);
-            if (sf_seek(in, static_cast<sf_count_t>(target_frame), SF_SEEK_SET) >=
-                0) {
-              snd_pcm_drop(out_pcm);
-              snd_pcm_prepare(out_pcm);
-              frames_written_total = static_cast<uint64_t>(target_frame);
-              playback_elapsed_sec.store(
-                  frames_written_total / static_cast<uint64_t>(sfinfo.samplerate));
-            }
-          }
-        }
-
-        const sf_count_t frames_read =
-            sf_readf_float(in, in_frames.data(), kChunkFrames);
-        if (frames_read <= 0) {
-          break;
-        }
-
-        const float gain =
-            std::pow(10.0f, static_cast<float>(playback_gain_db.load()) / 20.0f);
-        for (sf_count_t frame = 0; frame < frames_read; ++frame) {
-          const size_t base = static_cast<size_t>(frame) *
-                              static_cast<size_t>(sfinfo.channels);
-          const float left =
-              in_frames[base + static_cast<size_t>(left_idx)] * gain;
-          const float right =
-              in_frames[base + static_cast<size_t>(right_idx)] * gain;
-          const float l_clamped = std::max(-1.0f, std::min(1.0f, left));
-          const float r_clamped = std::max(-1.0f, std::min(1.0f, right));
-          const int l_int = static_cast<int>(
-              l_clamped * 32767.0f + (l_clamped >= 0.0f ? 0.5f : -0.5f));
-          const int r_int = static_cast<int>(
-              r_clamped * 32767.0f + (r_clamped >= 0.0f ? 0.5f : -0.5f));
-          out_frames[static_cast<size_t>(frame) * 2] =
-              static_cast<int16_t>(std::max(-32768, std::min(32767, l_int)));
-          out_frames[static_cast<size_t>(frame) * 2 + 1] =
-              static_cast<int16_t>(std::max(-32768, std::min(32767, r_int)));
-        }
-
-        snd_pcm_sframes_t frames_left = frames_read;
-        const int16_t* out_ptr = out_frames.data();
-        while (frames_left > 0 && !playback_stop_requested.load()) {
-          snd_pcm_sframes_t wrote = snd_pcm_writei(out_pcm, out_ptr, frames_left);
-          if (wrote == -EPIPE) {
-            snd_pcm_prepare(out_pcm);
-            continue;
-          }
-          if (wrote < 0) {
-            wrote = snd_pcm_recover(out_pcm, static_cast<int>(wrote), 1);
-            if (wrote < 0) {
-              std::fprintf(stderr, "snd_pcm_writei playback failed: %s\n",
-                           snd_strerror(static_cast<int>(wrote)));
-              SetPlaybackInfo("PLAYBACK WRITE FAIL", true);
-              playback_failed = true;
-              playback_stop_requested.store(true);
-              break;
-            }
-            continue;
-          }
-          frames_left -= wrote;
-          out_ptr += wrote * 2;
-          frames_written_total += static_cast<uint64_t>(wrote);
-          playback_elapsed_sec.store(
-              frames_written_total / static_cast<uint64_t>(sfinfo.samplerate));
-        }
-      }
-
-      const bool stopped_by_user = playback_stop_requested.load();
-      if (stopped_by_user) {
-        snd_pcm_drop(out_pcm);
-      } else {
-        snd_pcm_drain(out_pcm);
-      }
-      snd_pcm_close(out_pcm);
-      sf_close(in);
-      playback_active.store(false);
-      playback_stop_requested.store(false);
-      playback_elapsed_sec.store(0);
-      if (!playback_failed && !stopped_by_user) {
-        SetPlaybackInfo(route_label, false);
-      }
-    });
-    return true;
+    return ::StartPlayback(playback);
   };
   auto PlannedOutputPath = [&]() -> std::string {
     if (!current_out_path.empty() &&
@@ -1021,9 +582,9 @@ int RunApp(int argc, char** argv) {
                  "Idle mode enabled on HAT UI.\n"
                  "ALSA device: %s | period: %lu frames | buffer: %lu frames\n"
                  "Format: %d ch @ %u Hz (%s) | access: %s | start: %s\n"
-                  "Output file: %s\n"
-                  "Ring buffer: %lu ms (~%lu MB)\n"
-                  "LEFT/RIGHT cycle spcmic, zylia, playback, settings (seek while playing) | KEY2 MON/REC or play/save | KEY1 stop, playback stop, or settings edit/cancel | Ctrl+C exit.\n",
+                 "Output file: %s\n"
+                 "Ring buffer: %lu ms (~%lu MB)\n"
+                 "LEFT/RIGHT cycle spcmic, zylia, playback, settings (seek while playing) | KEY2 MON/REC or play/save | KEY1 stop, playback stop, or settings edit/cancel | Ctrl+C exit.\n",
                  current_device.c_str(), static_cast<unsigned long>(period_size),
                  static_cast<unsigned long>(buffer_size), current_channels,
                  actual_rate, fmt_label, AccessLabel(), start_label,
@@ -1059,6 +620,8 @@ int RunApp(int argc, char** argv) {
   const auto battery_interval = std::chrono::seconds(10);
   auto next_storage_poll = std::chrono::steady_clock::now();
   const auto storage_interval = std::chrono::seconds(30);
+  auto next_transfer_poll = std::chrono::steady_clock::now();
+  const auto transfer_interval = std::chrono::seconds(2);
   auto now_ms = []() -> int64_t {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
                std::chrono::steady_clock::now().time_since_epoch())
@@ -1269,7 +832,7 @@ int RunApp(int argc, char** argv) {
     snap.monitoring = monitoring_active.load();
     snap.playback_mode = (current_ui_mode == UiMode::kPlayback);
     snap.settings_mode = (current_ui_mode == UiMode::kSettings);
-    snap.playback_active = playback_active.load();
+    snap.playback_active = playback.active.load();
     snap.external_storage = using_external_storage.load();
     snap.finalize_pending = finalize_in_progress.load();
     snap.mic = MicKindToString(selected_mic);
@@ -1285,14 +848,33 @@ int RunApp(int argc, char** argv) {
     snap.peak_pct = peak_percent.load();
     snap.xruns = xrun_count.load();
     snap.dropped_bytes = dropped_bytes.load();
-    snap.playback_gain_db = playback_gain_db.load();
+    snap.playback_gain_db = playback.gain_db.load();
     snap.playback_elapsed_sec = snap.playback_active
-                                    ? playback_elapsed_sec.load()
-                                    : playback_selected_duration_sec.load();
+                                    ? playback.elapsed_sec.load()
+                                    : playback.selected_duration_sec.load();
     snap.settings_date = FormatManualClockDate(manual_clock);
     snap.settings_time = FormatManualClockTime(manual_clock);
     snap.settings_editing = settings_editing;
     snap.settings_field_index = manual_clock_field;
+    snap.settings_selected_item =
+        (settings_item == SettingsItem::kDateTime) ? 0 : 1;
+    snap.settings_transfer_open = transfer_open;
+    {
+      std::lock_guard<std::mutex> lock(transfer.mutex);
+      snap.settings_transfer_available = transfer.state.available;
+      snap.settings_transfer_running = transfer.state.running;
+      snap.settings_transfer_deleting = transfer.state.deleting;
+      snap.settings_transfer_error = transfer.state.error;
+      snap.settings_transfer_done = transfer.state.done;
+      snap.settings_transfer_can_start = transfer.state.can_start;
+      snap.settings_transfer_can_delete = transfer.state.can_delete;
+      snap.settings_transfer_direction = transfer.state.direction;
+      snap.settings_transfer_headline = transfer.state.headline;
+      snap.settings_transfer_detail = transfer.state.detail;
+      snap.settings_transfer_progress = transfer.state.progress;
+      snap.settings_transfer_current_file = transfer.state.current_file;
+      snap.settings_transfer_progress_pct = transfer.state.progress_pct;
+    }
     {
       std::lock_guard<std::mutex> lock(ring_mutex);
       if (ring.capacity() > 0) {
@@ -1301,20 +883,20 @@ int RunApp(int argc, char** argv) {
       }
     }
     {
-      std::lock_guard<std::mutex> lock(playback_mutex);
-      snap.playback_info = playback_info;
-      snap.playback_info_error = playback_info_error;
+      std::lock_guard<std::mutex> lock(playback.mutex);
+      snap.playback_info = playback.info;
+      snap.playback_info_error = playback.info_error;
       if (snap.playback_mode) {
-        const int total = static_cast<int>(playback_files.size());
+        const int total = static_cast<int>(playback.files.size());
         if (total > 0) {
-          const int selected = std::clamp(playback_selected, 0, total - 1);
+          const int selected = std::clamp(playback.selected, 0, total - 1);
           int start = std::max(0, selected - static_cast<int>(kPlaybackVisibleItems / 2));
           if (start + static_cast<int>(kPlaybackVisibleItems) > total) {
             start = std::max(0, total - static_cast<int>(kPlaybackVisibleItems));
           }
           const int end = std::min(total, start + static_cast<int>(kPlaybackVisibleItems));
           for (int i = start; i < end; ++i) {
-            snap.playback_items.push_back(MakePlaybackDisplayName(playback_files[i]));
+            snap.playback_items.push_back(MakePlaybackDisplayName(playback.files[i]));
           }
           snap.playback_selected_index = selected - start;
         }
@@ -1451,11 +1033,19 @@ int RunApp(int argc, char** argv) {
         RefreshStorageRemaining();
         next_storage_poll = now + storage_interval;
       }
+      if (current_ui_mode == UiMode::kSettings &&
+          settings_item == SettingsItem::kTransfer && !settings_editing &&
+          !transfer_open && now >= next_transfer_poll) {
+        RefreshTransferState();
+        next_transfer_poll = now + transfer_interval;
+      }
     }
+
+    JoinTransferThreadIfDone();
 
     const bool is_rec = recording_active.load();
     const bool is_mon = monitoring_active.load();
-    const bool is_play = playback_active.load();
+    const bool is_play = playback.active.load();
     joy_ud_repeat.store((current_ui_mode == UiMode::kSettings && settings_editing) ||
                         (current_ui_mode == UiMode::kPlayback && is_play) ||
                         (selected_mic == MicKind::kZylia &&
@@ -1469,75 +1059,127 @@ int RunApp(int argc, char** argv) {
       const bool down_evt = rate_down_requested.exchange(false);
 
       if (current_ui_mode == UiMode::kSettings) {
-        if (!settings_editing) {
-          start_requested.store(false);
-          if (stop_requested.exchange(false)) {
-            LoadManualClockFromSystem();
-            manual_clock_field = 0;
-            settings_editing = true;
+        if (transfer_open) {
+          if (stop_requested.exchange(false) && !transfer.thread_running.load()) {
+            transfer_open = false;
+            RefreshTransferState();
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
             continue;
           }
-          if (left_evt || right_evt) {
-            if (selected_mic == MicKind::kSpcmic) {
-              spcmic_rate_hz = opt.rate;
+          if (!transfer.thread_running.load() && start_requested.exchange(false)) {
+            bool delete_mode = false;
+            {
+              std::lock_guard<std::mutex> lock(transfer.mutex);
+              delete_mode = transfer.state.can_delete;
             }
-            const UiMode next_mode = left_evt ? PrevUiMode(current_ui_mode)
-                                              : NextUiMode(current_ui_mode);
-            current_ui_mode = next_mode;
-            if (current_ui_mode == UiMode::kPlayback) {
-              RefreshPlaybackFiles();
-              stop_requested.store(false);
-              std::this_thread::sleep_for(std::chrono::milliseconds(20));
-              continue;
+            const bool action_ok =
+                delete_mode ? DeleteTransferredFiles(transfer) : StartTransfer(transfer);
+            if (!action_ok) {
+              std::fprintf(stderr, "Failed to start transfer action\n");
             }
-            selected_mic =
-                (current_ui_mode == UiMode::kSpcmic) ? MicKind::kSpcmic : MicKind::kZylia;
-            ApplyMicPreset(selected_mic);
-            opt.rate = (selected_mic == MicKind::kSpcmic) ? spcmic_rate_hz : 48000;
-            if (!ApplyCurrentMicConfig()) {
-              break;
+          } else {
+            start_requested.store(false);
+          }
+          std::this_thread::sleep_for(std::chrono::milliseconds(20));
+          continue;
+        }
+        if (settings_editing) {
+          if (stop_requested.exchange(false)) {
+            LoadManualClockFromSystem();
+            manual_clock_field = 0;
+            settings_editing = false;
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            continue;
+          }
+          if (left_evt) {
+            manual_clock_field = (manual_clock_field + 5) % 6;
+          }
+          if (right_evt) {
+            manual_clock_field = (manual_clock_field + 1) % 6;
+          }
+          if (up_evt) {
+            AdjustManualClockField(manual_clock_field, 1);
+          }
+          if (down_evt) {
+            AdjustManualClockField(manual_clock_field, -1);
+          }
+          if (start_requested.exchange(false)) {
+            std::string clock_error;
+            if (ApplyManualClockToSystem(&clock_error)) {
+              RefreshStorageRemaining();
+              settings_editing = false;
+              manual_clock_field = 0;
+              std::fprintf(stdout, "System time set to %s %s\n",
+                           FormatManualClockDate(manual_clock).c_str(),
+                           FormatManualClockTime(manual_clock).c_str());
+            } else {
+              std::fprintf(stderr, "Failed to set system time: %s\n",
+                           clock_error.c_str());
             }
+          }
+          std::this_thread::sleep_for(std::chrono::milliseconds(20));
+          continue;
+        }
+
+        start_requested.store(false);
+        if (left_evt || right_evt) {
+          if (selected_mic == MicKind::kSpcmic) {
+            spcmic_rate_hz = opt.rate;
+          }
+          const UiMode next_mode = left_evt ? PrevUiMode(current_ui_mode)
+                                            : NextUiMode(current_ui_mode);
+          current_ui_mode = next_mode;
+          transfer_open = false;
+          if (current_ui_mode == UiMode::kPlayback) {
+            RefreshPlaybackFiles();
+            stop_requested.store(false);
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            continue;
+          }
+          if (current_ui_mode == UiMode::kSettings) {
+            settings_item = SettingsItem::kDateTime;
+            transfer_open = false;
+            stop_requested.store(false);
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            continue;
+          }
+          selected_mic =
+              (current_ui_mode == UiMode::kSpcmic) ? MicKind::kSpcmic : MicKind::kZylia;
+          ApplyMicPreset(selected_mic);
+          opt.rate = (selected_mic == MicKind::kSpcmic) ? spcmic_rate_hz : 48000;
+          if (!ApplyCurrentMicConfig()) {
+            break;
+          }
+          std::this_thread::sleep_for(std::chrono::milliseconds(20));
+          continue;
+        }
+        if (up_evt || down_evt) {
+          settings_item = (settings_item == SettingsItem::kDateTime)
+                              ? SettingsItem::kTransfer
+                              : SettingsItem::kDateTime;
+          transfer_open = false;
+          if (settings_item == SettingsItem::kTransfer) {
+            RefreshTransferState();
           }
           std::this_thread::sleep_for(std::chrono::milliseconds(20));
           continue;
         }
         if (stop_requested.exchange(false)) {
-          LoadManualClockFromSystem();
-          manual_clock_field = 0;
-          settings_editing = false;
+          if (settings_item == SettingsItem::kDateTime) {
+            LoadManualClockFromSystem();
+            manual_clock_field = 0;
+            settings_editing = true;
+          } else {
+            RefreshTransferState();
+            transfer_open = true;
+          }
           std::this_thread::sleep_for(std::chrono::milliseconds(20));
           continue;
-        }
-        if (left_evt) {
-          manual_clock_field = (manual_clock_field + 5) % 6;
-        }
-        if (right_evt) {
-          manual_clock_field = (manual_clock_field + 1) % 6;
-        }
-        if (up_evt) {
-          AdjustManualClockField(manual_clock_field, 1);
-        }
-        if (down_evt) {
-          AdjustManualClockField(manual_clock_field, -1);
-        }
-        if (start_requested.exchange(false)) {
-          std::string clock_error;
-          if (ApplyManualClockToSystem(&clock_error)) {
-            RefreshStorageRemaining();
-            settings_editing = false;
-            manual_clock_field = 0;
-            std::fprintf(stdout, "System time set to %s %s\n",
-                         FormatManualClockDate(manual_clock).c_str(),
-                         FormatManualClockTime(manual_clock).c_str());
-          } else {
-            std::fprintf(stderr, "Failed to set system time: %s\n",
-                         clock_error.c_str());
-          }
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
         continue;
       }
+
 
       if (current_ui_mode == UiMode::kPlayback) {
         if (is_play) {
@@ -1550,19 +1192,19 @@ int RunApp(int argc, char** argv) {
           start_requested.store(false);
           constexpr int64_t kPlaybackSeekStepSec = 5;
           if (left_evt) {
-            playback_seek_seconds_pending.fetch_sub(kPlaybackSeekStepSec);
+            playback.seek_seconds_pending.fetch_sub(kPlaybackSeekStepSec);
           }
           if (right_evt) {
-            playback_seek_seconds_pending.fetch_add(kPlaybackSeekStepSec);
+            playback.seek_seconds_pending.fetch_add(kPlaybackSeekStepSec);
           }
-          int gain_db = playback_gain_db.load();
+          int gain_db = playback.gain_db.load();
           if (up_evt) {
             gain_db = std::min(80, gain_db + 1);
           }
           if (down_evt) {
             gain_db = std::max(0, gain_db - 1);
           }
-          playback_gain_db.store(gain_db);
+          playback.gain_db.store(gain_db);
           std::this_thread::sleep_for(std::chrono::milliseconds(20));
           continue;
         }
@@ -1582,6 +1224,8 @@ int RunApp(int argc, char** argv) {
           } else if (next_mode == UiMode::kPlayback) {
             RefreshPlaybackFiles();
           } else if (next_mode == UiMode::kSettings) {
+            settings_item = SettingsItem::kDateTime;
+            transfer_open = false;
             LoadManualClockFromSystem();
             manual_clock_field = 0;
             settings_editing = false;
@@ -1598,11 +1242,11 @@ int RunApp(int argc, char** argv) {
           }
           if (delta != 0) {
             {
-              std::lock_guard<std::mutex> lock(playback_mutex);
-              if (!playback_files.empty()) {
-                playback_selected = std::clamp(
-                    playback_selected + delta, 0,
-                    static_cast<int>(playback_files.size()) - 1);
+              std::lock_guard<std::mutex> lock(playback.mutex);
+              if (!playback.files.empty()) {
+                playback.selected = std::clamp(
+                    playback.selected + delta, 0,
+                    static_cast<int>(playback.files.size()) - 1);
               }
             }
             RefreshPlaybackSelectionInfo();
@@ -1634,6 +1278,8 @@ int RunApp(int argc, char** argv) {
             continue;
           }
           if (current_ui_mode == UiMode::kSettings) {
+            settings_item = SettingsItem::kDateTime;
+            transfer_open = false;
             LoadManualClockFromSystem();
             manual_clock_field = 0;
             settings_editing = false;
@@ -1870,7 +1516,7 @@ int RunApp(int argc, char** argv) {
   if (monitoring_active.load()) {
     stop_monitoring();
   }
-  if (playback_active.load() || playback_thread.joinable()) {
+  if (playback.active.load() || playback.thread.joinable()) {
     StopPlayback();
   }
   stop_writer();
@@ -1883,6 +1529,12 @@ int RunApp(int argc, char** argv) {
   if (poweroff_after_shutdown && hat_ui) {
     hat_ui->ShowPoweroffMessage();
     std::this_thread::sleep_for(std::chrono::milliseconds(3000));
+  }
+  if (playback.thread.joinable()) {
+    playback.thread.join();
+  }
+  if (transfer.thread.joinable()) {
+    transfer.thread.join();
   }
   if (hat_ui) {
     hat_ui->Shutdown();
@@ -1920,4 +1572,3 @@ int RunApp(int argc, char** argv) {
   }
   return 0;
 }
-

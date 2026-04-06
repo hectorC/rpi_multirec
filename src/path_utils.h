@@ -11,14 +11,14 @@ inline void SetRecordingsDir(const std::string& path) {
   g_recordings_dir = path.empty() ? std::string(kDefaultRecordingsDir) : path;
 }
 
-std::string ToLowerCopy(std::string s) {
+inline std::string ToLowerCopy(std::string s) {
   std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) {
     return static_cast<char>(std::tolower(c));
   });
   return s;
 }
 
-std::string BuildTimestampOutPath(MicKind mic) {
+inline std::string BuildTimestampOutPath(MicKind mic) {
   const char* mic_name = MicKindToFilePrefix(mic);
   std::time_t now = std::time(nullptr);
   std::tm tm_now{};
@@ -29,25 +29,25 @@ std::string BuildTimestampOutPath(MicKind mic) {
 #endif
   std::ostringstream oss;
   oss << RecordingsDir() << "/" << mic_name << "_"
-      << std::put_time(&tm_now, "%Y%m%d_%H%M%S") << ".rf64";
+      << std::put_time(&tm_now, "%Y%m%d_%H%M%S") << ".wav";
   return oss.str();
 }
 
-std::string BuildTakeOutPath(MicKind mic, uint64_t take_number) {
+inline std::string BuildTakeOutPath(MicKind mic, uint64_t take_number) {
   const char* mic_name = MicKindToFilePrefix(mic);
   std::ostringstream oss;
   oss << RecordingsDir() << "/" << mic_name << "_T" << std::setfill('0')
-      << std::setw(4) << take_number << ".rf64";
+      << std::setw(4) << take_number << ".wav";
   return oss.str();
 }
 
-std::string BuildAutoOutPath(MicKind mic, bool use_timestamp,
-                             uint64_t take_number) {
+inline std::string BuildAutoOutPath(MicKind mic, bool use_timestamp,
+                                    uint64_t take_number) {
   return use_timestamp ? BuildTimestampOutPath(mic)
                        : BuildTakeOutPath(mic, take_number);
 }
 
-std::string EnsureRecordingsPath(const std::string& path) {
+inline std::string EnsureRecordingsPath(const std::string& path) {
   if (path.empty()) {
     return path;
   }
@@ -58,8 +58,8 @@ std::string EnsureRecordingsPath(const std::string& path) {
   return (std::filesystem::path(RecordingsDir()) / p).string();
 }
 
-bool EnsureParentDirectoryExists(const std::string& file_path,
-                                 std::string* error) {
+inline bool EnsureParentDirectoryExists(const std::string& file_path,
+                                        std::string* error) {
   try {
     const std::filesystem::path p(file_path);
     const std::filesystem::path parent = p.parent_path();
@@ -76,7 +76,8 @@ bool EnsureParentDirectoryExists(const std::string& file_path,
   }
 }
 
-bool GetFreeBytesForPath(const std::string& file_path, uint64_t* free_bytes) {
+inline bool GetFreeBytesForPath(const std::string& file_path,
+                                uint64_t* free_bytes) {
   if (!free_bytes) {
     return false;
   }
@@ -106,7 +107,7 @@ bool GetFreeBytesForPath(const std::string& file_path, uint64_t* free_bytes) {
 #endif
 }
 
-std::string DecodeMountPath(const std::string& path) {
+inline std::string DecodeMountPath(const std::string& path) {
   std::string decoded;
   decoded.reserve(path.size());
   for (size_t i = 0; i < path.size(); ++i) {
@@ -125,7 +126,7 @@ std::string DecodeMountPath(const std::string& path) {
   return decoded;
 }
 
-std::string DetectExternalRecordingsDir() {
+inline std::string DetectExternalRecordingsDir() {
 #ifdef __linux__
   std::ifstream mounts("/proc/mounts");
   if (!mounts.is_open()) {
@@ -168,8 +169,8 @@ std::string DetectExternalRecordingsDir() {
   return {};
 }
 
-bool TryParseTakeNumberFromPath(const std::filesystem::path& file_path,
-                                uint64_t* take_number) {
+inline bool TryParseTakeNumberFromPath(const std::filesystem::path& file_path,
+                                       uint64_t* take_number) {
   if (!take_number) {
     return false;
   }
@@ -203,7 +204,7 @@ bool TryParseTakeNumberFromPath(const std::filesystem::path& file_path,
   return true;
 }
 
-uint64_t FindHighestExistingTakeNumber() {
+inline uint64_t FindHighestExistingTakeNumber() {
   std::error_code ec;
   const std::filesystem::path root(RecordingsDir());
   if (!std::filesystem::exists(root, ec) || !std::filesystem::is_directory(root, ec)) {
@@ -225,7 +226,8 @@ uint64_t FindHighestExistingTakeNumber() {
   return max_take;
 }
 
-std::string BuildManualTakePath(const std::string& base_path, int take_index) {
+inline std::string BuildManualTakePath(const std::string& base_path,
+                                       int take_index) {
   if (take_index <= 1) {
     return base_path;
   }
