@@ -227,6 +227,8 @@ guest ok = no
 force group = recshare
 create mask = 0664
 directory mask = 2775
+change notify = yes
+kernel change notify = yes
 ```
 
 Optional in `[global]`:
