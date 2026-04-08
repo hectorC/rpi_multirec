@@ -36,8 +36,7 @@ This section is a first draft. Obvious major parts are listed here; additional p
 
 ### Core parts
 
-- Raspberry Pi 3 Model B+ (tested)
-- Other Raspberry Pi models may work, but are not yet documented as supported
+- Raspberry Pi 4 Model B (tested)
 - MicroSD card for the OS
 - Power source suitable for stable multichannel USB recording (if not using the UPS module)
 - USB microphone arrays (they can be plugged in simultaneously and are user selectable, but only one can be recorded at a time):
@@ -75,7 +74,7 @@ A later revision of this README should document which printed parts correspond t
 
 ## Software dependencies
 
-Target platform: Raspberry Pi OS Lite on Raspberry Pi 3 Model B+ (tested).
+Target platform: Raspberry Pi OS Lite on Raspberry Pi 4 Model B (tested).
 
 Build dependencies:
 
@@ -139,6 +138,13 @@ Examples:
 - `/srv/rpi_multirec/recordings/spc_20260222_143015.wav`
 
 The files are still written as RF64/WAV internally; the `.wav` extension is used for better DAW compatibility.
+
+Filename behavior summary:
+
+- If the user has not manually set date/time in the current boot session, the recorder uses monotonic take numbering
+- If the user manually sets date/time from the HAT settings page, the recorder switches to timestamp-based filenames for the rest of that boot session
+- On startup, the recorder scans the active recordings root and continues from the highest existing `T####` take number it finds
+- Timestamp-based files do not affect the monotonic take counter
 
 ### Common options
 
@@ -214,15 +220,17 @@ Default internal recordings root:
 
 Current storage behavior:
 
+- Only `exFAT` external storage is supported for automatic external recording and for on-device transfer.
 - If no suitable external drive is mounted when the app starts, recording goes to the internal recordings root.
-- If an exFAT external drive is already mounted when the app starts, recording is redirected to:
+- If an `exFAT` external drive is already mounted when the app starts, recording is redirected to:
 
 ```text
 <mountpoint>/rpi_multirec
 ```
 
 - That folder is created automatically if needed.
-- External storage detection currently happens only once, at app startup.
+- External storage detection for recording currently happens only once, at app startup.
+- To record directly to external storage, the `exFAT` drive must be plugged in and mounted before the app starts.
 - If `--out` is relative, it is resolved under the active recordings root.
 - If `--out` is absolute, that path is used as-is.
 
@@ -232,13 +240,36 @@ From the `TRANSFER` item in the HAT settings page, the recorder can copy files b
 
 Current transfer behavior:
 
+- Only `exFAT` external storage is supported for transfer.
 - If the recorder booted in normal internal-storage mode, transfer direction is `SD -> EXT`
-- If the recorder booted in external-storage `E` mode, transfer direction is `EXT -> SD`
-- Late-inserted exFAT drives are detected from the transfer page, even though recording destination is still chosen only at app startup
+- If the recorder booted in external-storage `E` mode because a valid `exFAT` drive was present at startup, transfer direction is `EXT -> SD`
+- If no valid `exFAT` drive was present at startup, the recorder stays on internal storage for that session even if a drive is inserted later
+- A valid `exFAT` drive inserted after boot can still be detected from the transfer page
+- In that after-boot insertion case, transfer direction is `SD -> EXT`
 - Files are copied into the standard destination recordings folder (`/srv/rpi_multirec/recordings` on SD, `<mount>/rpi_multirec` on external storage)
 - Existing destination files are skipped
 - After a successful transfer, `KEY2` can delete only the source files that were copied successfully or were already present at the destination with matching size
 - Source files are never deleted automatically
+
+## Settings page
+
+The HAT UI includes a `SET` page with two items:
+
+- `DATE/TIME`
+- `TRANSFER`
+
+Current settings behavior:
+
+- Use joystick `LEFT/RIGHT` to enter or leave the `SET` page as part of the normal top-level page cycle
+- Use joystick `UP/DOWN` to select `DATE/TIME` or `TRANSFER`
+- With `DATE/TIME` selected, press `KEY1` to enter edit mode
+- In date/time edit mode, joystick `LEFT/RIGHT` moves between year, month, day, hour, minute, and second
+- In date/time edit mode, joystick `UP/DOWN` changes the selected field
+- In date/time edit mode, the selected field is shown in orange
+- `KEY1` cancels date/time editing
+- `KEY2` applies the date/time to the system clock
+- With `TRANSFER` selected, `KEY1` opens the transfer view and `KEY2` starts the copy when a valid destination is available
+- After a successful transfer, `KEY2` can delete only the safely copied source files
 
 ## Waveshare LCD HAT UI
 
@@ -340,7 +371,6 @@ License and hardware release terms are not defined in this draft yet.
 ## TODO for README expansion
 
 - add full BOM with exact part names and links
-- document Raspberry Pi model(s) used and tested
 - document enclosure assembly
 - document HAT wiring / stack order
 - document the supported installation workflow and tested setup variants
