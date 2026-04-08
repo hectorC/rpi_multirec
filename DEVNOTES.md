@@ -112,15 +112,32 @@ Example:
 ./build/rpi_multirec --mic spcmic --rate 48000 --hat-ui --status-ms 1000
 ```
 
+## Supported hardware platform
+
+**Raspberry Pi 4 Model B** is the required and tested platform.
+
+**Raspberry Pi 3 Model B+ is not compatible** with the Spacemic 84-channel microphone. Waveform discontinuities (not reported as XRUNs) were consistently observed on RPi 3B regardless of whether Ethernet was connected, and migrating to RPi 4 eliminated them entirely.
+
+The suspected architectural cause is the LAN9514 chip on RPi 3B, which puts all four USB ports and the Ethernet controller on a single USB 2.0 connection to the DWC2 USB host controller. The Spacemic mic uses asynchronous isochronous USB at 8000 microframes/sec, which is sensitive to bus contention. The exact trigger was not isolated, but the shared-bus architecture is the most likely culprit.
+
+The RPi 4 uses a VL805 USB 3.0 controller connected via a dedicated PCIe lane, and the Gigabit Ethernet is also on a separate PCIe lane, eliminating any shared-bus contention.
+
+**Compatibility notes for the RPi 4 swap:**
+- Same 40-pin GPIO pinout — the LCD HAT and UPS HAT physically fit without modification
+- Same SPI/I2C pin assignments — no code changes needed
+- UPS HAT (B) I2C address 0x42 confirmed working on RPi 4
+- USB 3.0 (blue) ports on RPi 4 are backward-compatible with the USB 2.0 microphones
+- `/boot/firmware/config.txt` is the correct path on Raspberry Pi OS Lite Trixie (same as before)
+
 ## USB stability checklist (sporadic clicks with zero XRUNs)
 If you see kernel logs like:
 ```
 dwc2_hc_halt() Channel can't be halted
 ```
-it points to USB controller instability on the Pi.
+this is a strong indicator of the RPi 3B LAN9514 shared-bus architecture issue described above. Migrate to RPi 4.
 
-Recommended steps:
-1. Use a known-good 5V/2.5A+ power supply.
+On RPi 4, if clicks still occur:
+1. Use a known-good 5V/3A+ power supply (RPi 4 draws more than 3B).
 2. Try a short, high-quality USB cable.
 3. Disable Wi-Fi/Bluetooth temporarily to reduce bus contention:
    - `sudo rfkill block wifi`

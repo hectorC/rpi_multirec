@@ -48,13 +48,7 @@ This section is a first draft. Obvious major parts are listed here; additional p
 - Waveshare `1.3inch LCD HAT` - https://www.waveshare.com/1.3inch-lcd-hat.htm
 - Waveshare `UPS HAT (B)` - https://www.waveshare.com/ups-hat-b.htm
 
-### Example builds
-
-Compact version without the battery module. This version is smaller, but it needs external power such as a USB power bank:
-
-![Recorder without battery module](images/rpi_noBatteryModule.jpg)
-
-Version with the battery module installed. This version is bulkier, but it is self-contained:
+### Example build
 
 ![Recorder with battery module](images/rpi_wBatteryModule.jpg)
 
@@ -63,12 +57,10 @@ Version with the battery module installed. This version is bulkier, but it is se
 The `STL/` folder contains enclosure parts that can be 3D printed for the recorder build:
 
 - `STL/RPi_RecorderButtons.stl`
-- `STL/RPi_RecorderCaseBottomBattery.stl`
-- `STL/RPi_RecorderCaseBottomNoBattery.stl`
-- `STL/RPi_RecorderCaseBottomSideInsertBattery.stl`
-- `STL/RPi_RecorderCaseTop.stl`
+- `STL/RPi4_RecorderCaseBottomBattery.stl`
+- `STL/RPi4_RecorderCaseBottomSideInsertBattery.stl`
+- `STL/RPi4_RecorderCaseTop.stl`
 - `STL/RPi_RecorderLCDSupportL.stl`
-- `STL/RPi_RecorderLCDSupportS.stl`
 
 A later revision of this README should document which printed parts correspond to which hardware configuration and describe the assembly process. The LCD supports are for the side of the LCD module that is overhanging.
 
