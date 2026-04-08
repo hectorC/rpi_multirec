@@ -24,6 +24,7 @@ struct UiSnapshot {
   bool zylia_gain_valid = false;
   int zylia_gain_db = 0;
   int peak_pct = 0;
+  bool clip_latched = false;
   uint64_t xruns = 0;
   uint64_t dropped_bytes = 0;
   int ring_fill_pct = 0;
@@ -505,7 +506,7 @@ class WaveshareHatUi {
       DrawText(margin + elapsed_w + 8, 49, "E", kOrange, 2);
     }
 
-    DrawText(margin, 86, "PEAK", kCyan, 2);
+    DrawText(margin, 86, "PEAK", snap.clip_latched ? kRed : kCyan, 2);
     const int meter_x = margin + 54;
     const int meter_y = 90;
     const int meter_w = 164;
@@ -983,5 +984,3 @@ class WaveshareHatUi {
 };
 
 #endif
-
-

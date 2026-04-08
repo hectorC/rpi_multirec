@@ -66,6 +66,65 @@ std::string FormatHms(uint64_t total_sec) {
   return std::string(out);
 }
 
+inline int PeakAbsToDisplayPercent(int32_t max_abs, int32_t full_scale) {
+  if (max_abs <= 0 || full_scale <= 0) {
+    return 0;
+  }
+  const double ratio = static_cast<double>(max_abs) /
+                       static_cast<double>(full_scale);
+  if (ratio <= 0.0) {
+    return 0;
+  }
+  constexpr double kFloorDb = -72.0;
+  const double dbfs = 20.0 * std::log10(ratio);
+  if (dbfs <= kFloorDb) {
+    return 0;
+  }
+  const double normalized = (dbfs - kFloorDb) / (-kFloorDb);
+  const int pct = static_cast<int>(normalized * 100.0 + 0.5);
+  return std::max(0, std::min(100, pct));
+}
+
+inline bool HasDigitalClip(const uint8_t* data, size_t bytes,
+                           snd_pcm_format_t fmt) {
+  if (!data || bytes == 0) {
+    return false;
+  }
+
+  if (fmt == SND_PCM_FORMAT_S16_LE) {
+    const size_t samples = bytes / 2;
+    for (size_t i = 0; i < samples; ++i) {
+      const size_t o = i * 2;
+      const int16_t s = static_cast<int16_t>(
+          static_cast<uint16_t>(data[o]) |
+          (static_cast<uint16_t>(data[o + 1]) << 8));
+      if (s == 32767 || s == -32768) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  if (fmt == SND_PCM_FORMAT_S24_3LE) {
+    const size_t samples = bytes / 3;
+    for (size_t i = 0; i < samples; ++i) {
+      const size_t o = i * 3;
+      int32_t v = static_cast<int32_t>(data[o]) |
+                  (static_cast<int32_t>(data[o + 1]) << 8) |
+                  (static_cast<int32_t>(data[o + 2]) << 16);
+      if (v & 0x00800000) {
+        v |= ~0x00FFFFFF;
+      }
+      if (v == 8388607 || v == -8388608) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  return false;
+}
+
 int ComputePeakPercent(const uint8_t* data, size_t bytes, snd_pcm_format_t fmt) {
   if (!data || bytes == 0) {
     return 0;
@@ -84,7 +143,7 @@ int ComputePeakPercent(const uint8_t* data, size_t bytes, snd_pcm_format_t fmt) 
         max_abs = a;
       }
     }
-    return static_cast<int>((max_abs * 100LL) / 32767LL);
+    return PeakAbsToDisplayPercent(max_abs, 32767);
   }
 
   if (fmt == SND_PCM_FORMAT_S24_3LE) {
@@ -103,7 +162,7 @@ int ComputePeakPercent(const uint8_t* data, size_t bytes, snd_pcm_format_t fmt) 
         max_abs = a;
       }
     }
-    return static_cast<int>((max_abs * 100LL) / 8388607LL);
+    return PeakAbsToDisplayPercent(max_abs, 8388607);
   }
 
   return 0;

@@ -9,6 +9,7 @@
 #include <cctype>
 #include <chrono>
 #include <condition_variable>
+#include <cmath>
 #include <csignal>
 #include <cstdint>
 #include <cstdio>
@@ -35,5 +36,4 @@
 #include <sys/ioctl.h>
 #include <sys/statvfs.h>
 #include <unistd.h>
-#include <cmath>
 #endif

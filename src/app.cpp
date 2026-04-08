@@ -346,6 +346,7 @@ int RunApp(int argc, char** argv) {
   std::atomic<int64_t> record_start_ms{0};
   std::atomic<uint64_t> finalize_elapsed_sec{0};
   std::atomic<int> peak_percent{0};
+  std::atomic<int64_t> clip_latch_until_ms{0};
   std::atomic<bool> joy_ud_repeat{false};
   std::atomic<bool> joy_lr_repeat{false};
   std::atomic<bool> zylia_gain_valid{false};
@@ -845,6 +846,8 @@ int RunApp(int argc, char** argv) {
     snap.zylia_gain_valid = zylia_gain_valid.load();
     snap.zylia_gain_db = zylia_gain_db.load();
     snap.peak_pct = peak_percent.load();
+    snap.clip_latched =
+        now_ms() < clip_latch_until_ms.load();
     snap.xruns = xrun_count.load();
     snap.dropped_bytes = dropped_bytes.load();
     snap.playback_gain_db = playback.gain_db.load();
@@ -1409,6 +1412,9 @@ int RunApp(int argc, char** argv) {
       peak_percent.store(
           std::max(0, std::min(100, ComputePeakPercent(buffer.data(), bytes,
                                                        opt.format))));
+      if (HasDigitalClip(buffer.data(), bytes, opt.format)) {
+        clip_latch_until_ms.store(now_ms() + 2000);
+      }
       if (recording_active.load()) {
         bool pushed = false;
         {
@@ -1468,6 +1474,9 @@ int RunApp(int argc, char** argv) {
       peak_percent.store(
           std::max(0, std::min(100, ComputePeakPercent(buffer.data(), bytes,
                                                        opt.format))));
+      if (HasDigitalClip(buffer.data(), bytes, opt.format)) {
+        clip_latch_until_ms.store(now_ms() + 2000);
+      }
       if (recording_active.load()) {
         bool pushed = false;
         {
