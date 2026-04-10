@@ -22,6 +22,7 @@ They do not download third-party vendor drivers for you.
 Recommended target:
 
 - Raspberry Pi OS Lite
+- Raspberry Pi 4 Model B or newer
 
 The current installer is written for Raspberry Pi OS Lite first. Some notes in `DEVNOTES.md` reference earlier Ubuntu Server bring-up work; treat those as historical reference unless you are intentionally using Ubuntu again.
 
@@ -95,6 +96,7 @@ Useful examples:
 ```bash
 sudo ./scripts/install_rpi.sh --repo-dir /home/pi/rpi_multirec --run-user pi
 sudo ./scripts/install_rpi.sh --no-samba --no-automount
+sudo ./scripts/install_rpi.sh --samba-password-prompt
 sudo ./scripts/install_rpi.sh --recorder-args "--hat-ui --mic zylia"
 sudo ./scripts/install_rpi.sh --start-service
 ```
@@ -110,6 +112,7 @@ Core packages:
 - `build-essential`
 - `cmake`
 - `pkg-config`
+- `python3`
 - `libasound2-dev`
 - `libsndfile1-dev`
 - `libgpiod-dev`
@@ -144,7 +147,9 @@ If Samba setup is enabled, the script:
 - creates the `recshare` system user if needed
 - installs the managed `[recordings]` Samba share block
 - enables `smbd` and `avahi-daemon`
-- prompts for a Samba password only if the Samba account does not already exist
+- configures Samba null-password support for this dedicated share workflow
+- sets the `recshare` Samba password to blank by default
+- prompts for a Samba password instead if `--samba-password-prompt` is used
 
 Windows access:
 
@@ -158,6 +163,11 @@ macOS Finder access:
 smb://rpirec.local/recordings
 ```
 
+Default login:
+
+- username: `recshare`
+- password: blank
+
 ### USB automount
 
 If automount is enabled, the script installs:
@@ -165,7 +175,7 @@ If automount is enabled, the script installs:
 - `deploy/udev/99-rpi_multirec-automount.rules`
 - `deploy/systemd/rpi-usb-automount@.service`
 
-This allows Raspberry Pi OS Lite to mount arbitrary exFAT USB storage so the recorder can use it at startup.
+This allows Raspberry Pi OS Lite to mount arbitrary exFAT USB storage so the recorder can use it at startup. Non-exFAT removable filesystems are intentionally ignored by the recorder workflow.
 
 ### Boot service
 

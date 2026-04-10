@@ -8,6 +8,7 @@ SAMBA_USER="recshare"
 HOSTNAME_TARGET="rpirec"
 RECORDER_ARGS="--hat-ui --mic spcmic"
 WITH_SAMBA=1
+SAMBA_BLANK_PASSWORD=1
 WITH_AUTOMOUNT=1
 ENABLE_BOOT_SERVICE=1
 START_SERVICE=0
@@ -25,6 +26,7 @@ Options:
   --hostname <name>        Hostname for Avahi/Samba discovery (default: rpirec)
   --recorder-args <args>   Arguments passed to rpi_multirec.service
   --no-samba               Skip Samba + Avahi setup
+  --samba-password-prompt  Prompt for a Samba password instead of blank
   --no-automount           Skip exFAT USB automount setup
   --no-boot-service        Skip boot service installation
   --no-build               Skip cmake configure/build
@@ -58,6 +60,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --no-samba)
       WITH_SAMBA=0
+      shift
+      ;;
+    --samba-password-prompt)
+      SAMBA_BLANK_PASSWORD=0
       shift
       ;;
     --no-automount)
@@ -112,11 +118,23 @@ log() {
   echo "[install_rpi] $*"
 }
 
+check_target_platform() {
+  if [[ -r /proc/device-tree/model ]]; then
+    local model
+    model="$(tr -d '\0' </proc/device-tree/model)"
+    log "Detected platform: ${model}"
+    if [[ "${model}" != *"Raspberry Pi 4"* && "${model}" != *"Raspberry Pi 5"* ]]; then
+      log "WARNING: Raspberry Pi 4 or newer is recommended for 84-channel spcmic capture."
+    fi
+  fi
+}
+
 install_packages() {
   local packages=(
     build-essential
     cmake
     pkg-config
+    python3
     libasound2-dev
     libsndfile1-dev
     libgpiod-dev
@@ -171,6 +189,7 @@ install_samba_block() {
   python3 - "$smb_conf" "$block_file" "$begin" "$end" <<'PY'
 from pathlib import Path
 import sys
+import re
 
 smb_conf = Path(sys.argv[1])
 block_file = Path(sys.argv[2])
@@ -178,6 +197,29 @@ begin = sys.argv[3]
 end = sys.argv[4]
 block = block_file.read_text(encoding='utf-8').strip() + "\n"
 text = smb_conf.read_text(encoding='utf-8') if smb_conf.exists() else "[global]\n"
+
+lines = text.splitlines()
+global_idx = None
+for idx, line in enumerate(lines):
+    if re.match(r"^\s*\[global\]\s*$", line, re.IGNORECASE):
+        global_idx = idx
+        break
+if global_idx is None:
+    lines.insert(0, "[global]")
+    global_idx = 0
+next_section = len(lines)
+for idx in range(global_idx + 1, len(lines)):
+    if re.match(r"^\s*\[.+\]\s*$", lines[idx]):
+        next_section = idx
+        break
+lines = [
+    line for idx, line in enumerate(lines)
+    if not (global_idx < idx < next_section and
+            re.match(r"^\s*null passwords\s*=", line, re.IGNORECASE))
+]
+lines.insert(global_idx + 1, "null passwords = yes")
+text = "\n".join(lines) + "\n"
+
 managed = begin + "\n" + block + end + "\n"
 if begin in text and end in text:
     start = text.index(begin)
@@ -213,8 +255,16 @@ setup_samba() {
   install_samba_block
 
   if ! pdbedit -L 2>/dev/null | cut -d: -f1 | grep -qx "${SAMBA_USER}"; then
-    log "Create a Samba password for ${SAMBA_USER}"
-    smbpasswd -a "${SAMBA_USER}"
+    if [[ ${SAMBA_BLANK_PASSWORD} -eq 1 ]]; then
+      log "Creating blank Samba password for ${SAMBA_USER}"
+      smbpasswd -a -n "${SAMBA_USER}"
+    else
+      log "Create a Samba password for ${SAMBA_USER}"
+      smbpasswd -a "${SAMBA_USER}"
+    fi
+  elif [[ ${SAMBA_BLANK_PASSWORD} -eq 1 ]]; then
+    log "Resetting Samba password for ${SAMBA_USER} to blank"
+    smbpasswd -n "${SAMBA_USER}"
   fi
 
   testparm -s >/dev/null
@@ -272,6 +322,7 @@ install_boot_service() {
   fi
 }
 
+check_target_platform
 install_packages
 enable_interfaces
 setup_recordings_dir
